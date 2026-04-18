@@ -19,10 +19,22 @@ The wrapped `claude` CLI needs one of:
 
 `ACPSession` ignores this and works with either auth method out of the box.
 
-## Install
+## Getting started
 
 ```bash
+# 1. Clone
+git clone https://github.com/laminko/cckit.git
+cd cckit
+
+# 2. Authenticate — pick one
+claude login                          # OAuth (recommended)
+# export ANTHROPIC_API_KEY=sk-ant-... # or API key
+
+# 3. Install
 uv sync
+
+# 4. Run an example
+uv run python examples/basic_usage.py
 ```
 
 ## Quick start
