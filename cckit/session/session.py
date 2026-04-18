@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 
-from ..core.cli import ClaudeCLI
+from ..core.cli import CLI
 from ..core.config import SessionConfig
 from ..streaming.events import Event
 from ..types.messages import Message
@@ -24,7 +24,7 @@ class Session:
 
     def __init__(
         self,
-        cli: ClaudeCLI,
+        cli: CLI,
         config: SessionConfig | None = None,
         session_id: str | None = None,
     ) -> None:
@@ -39,7 +39,7 @@ class Session:
     @classmethod
     async def create(
         cls,
-        cli: ClaudeCLI,
+        cli: CLI,
         *,
         tools: list[str] | None = None,
         model: str | None = None,
@@ -57,7 +57,7 @@ class Session:
         return cls(cli, config=config)
 
     @classmethod
-    def resume(cls, cli: ClaudeCLI, session_id: str, config: SessionConfig | None = None) -> "Session":
+    def resume(cls, cli: CLI, session_id: str, config: SessionConfig | None = None) -> "Session":
         """Re-attach to an existing CLI session by its session_id."""
         return cls(cli, config=config, session_id=session_id)
 

@@ -1,6 +1,8 @@
-# claude-agent
+# cckit
 
 An async Python framework that wraps the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) for building local LLM agents.
+
+> **Not affiliated with Anthropic.** "Claude" and "Claude Code" are trademarks of Anthropic, PBC. `cckit` is an independent third-party toolkit that calls the `claude` CLI binary via subprocess.
 
 ## Requirements
 
@@ -12,7 +14,7 @@ An async Python framework that wraps the [Claude Code CLI](https://docs.anthropi
 
 The wrapped `claude` CLI needs one of:
 
-- **OAuth** — run `claude login` once. Pass `bare=False` to `ClaudeCLI.execute`, `Session.create`, and any agent constructor (the library's `bare=True` default disables OAuth/keychain reads).
+- **OAuth** — run `claude login` once. Pass `bare=False` to `CLI.execute`, `Session.create`, and any agent constructor (the library's `bare=True` default disables OAuth/keychain reads).
 - **API key** — set `ANTHROPIC_API_KEY`. The default `bare=True` then works as-is.
 
 `ACPSession` ignores this and works with either auth method out of the box.
@@ -27,10 +29,10 @@ uv sync
 
 ```python
 import asyncio
-from claude_agent import ClaudeCLI
+from cckit import CLI
 
 async def main():
-    cli = ClaudeCLI()
+    cli = CLI()
     response = await cli.execute("What is 2 + 2?", bare=False)
     print(response.result)
 
@@ -41,7 +43,7 @@ asyncio.run(main())
 
 The library offers two execution paths:
 
-- **One-shot (`ClaudeCLI` / `Session`)** — spawns a fresh `claude` subprocess per call. Simple, good for scripts.
+- **One-shot (`CLI` / `Session`)** — spawns a fresh `claude` subprocess per call. Simple, good for scripts.
 - **Persistent (`ACPSession`)** — keeps a single `claude` subprocess alive and talks to it over JSON-RPC 2.0. Good for long conversations, permission prompts, and file callbacks.
 
 ### One-shot execution
@@ -55,7 +57,7 @@ response = await cli.execute("Summarise this file", tools=["Read"])
 ### Streaming
 
 ```python
-from claude_agent import TextChunkEvent
+from cckit import TextChunkEvent
 
 async for event in cli.execute_streaming("Explain async/await"):
     if isinstance(event, TextChunkEvent):
@@ -69,7 +71,7 @@ Other event types: `ToolUseEvent`, `ToolResultEvent`, `MessageCompleteEvent`, `R
 A `Session` preserves context across turns using `--resume` under the hood.
 
 ```python
-from claude_agent import Session
+from cckit import Session
 
 session = await Session.create(cli, tools=["Read", "Edit"])
 r1 = await session.send("Read auth.py")
@@ -81,7 +83,7 @@ r2 = await session.send("Find all callers of login()")  # context preserved
 Pre-configured `BaseAgent` subclasses bundle a tool set and system prompt.
 
 ```python
-from claude_agent import CodeAgent, ResearchAgent, CustomAgent
+from cckit import CodeAgent, ResearchAgent, CustomAgent
 
 # Coding (Read/Edit/Write/MultiEdit/Bash/Grep/Glob)
 result = await CodeAgent().execute("Fix type errors in src/")
@@ -104,7 +106,7 @@ result = await agent.execute("Audit the auth module")
 
 ```python
 from pathlib import Path
-from claude_agent import ClaudeCLI, MCPManager, Session
+from cckit import CLI, MCPManager, Session
 
 workspace = str(Path.cwd())
 
@@ -115,7 +117,7 @@ config_path = mcp.write_config_file()
 
 try:
     session = await Session.create(
-        ClaudeCLI(),
+        CLI(),
         mcp_config_path=config_path,
         tools=["mcp__filesystem__list_directory"],
     )
@@ -132,7 +134,7 @@ finally:
 `ACPSession` keeps one `claude` subprocess alive and speaks JSON-RPC 2.0 over stdio (Agent Communication Protocol). This lets the agent call back into your code for permission checks, file reads, and file writes, and lets you cancel an in-flight prompt.
 
 ```python
-from claude_agent import ACPSession, PermissionPolicy, TextChunkEvent
+from cckit import ACPSession, PermissionPolicy, TextChunkEvent
 
 async with await ACPSession.create(
     permission_policy=PermissionPolicy.AUTO_APPROVE,
@@ -154,8 +156,8 @@ Lower-level building blocks (`RpcTransport`, `ACPClient`, `DefaultHandlers`) are
 ## Project layout
 
 ```
-claude_agent/
-├── core/        # ClaudeCLI, CommandBuilder, CLIConfig, SessionConfig, ACPConfig
+cckit/
+├── core/        # CLI, CommandBuilder, CLIConfig, SessionConfig, ACPConfig
 ├── streaming/   # StreamHandler, parsers, typed Events
 ├── session/     # Session, ACPSession, ConversationManager, MessageHistory
 ├── agents/      # BaseAgent, CodeAgent, ResearchAgent, ConversationAgent, CustomAgent

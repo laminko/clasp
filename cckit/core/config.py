@@ -41,7 +41,7 @@ class ACPConfig:
     binary_path: str = "~/.local/bin/claude"
     model: str | None = None
     permission_policy: str = "auto_approve"
-    client_name: str = "claude-agent"
+    client_name: str = "cckit"
     client_version: str = "0.1.0"
     request_timeout: float = 30.0
     shutdown_timeout: float = 5.0

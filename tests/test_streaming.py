@@ -5,16 +5,16 @@ import json
 
 import pytest
 
-from claude_agent.streaming.events import (
+from cckit.streaming.events import (
     MessageCompleteEvent,
     ResultEvent,
     SystemEvent,
     TextChunkEvent,
     ToolUseEvent,
 )
-from claude_agent.streaming.handler import StreamHandler
-from claude_agent.streaming.parser import parse_line
-from claude_agent.utils.errors import ParseError
+from cckit.streaming.handler import StreamHandler
+from cckit.streaming.parser import parse_line
+from cckit.utils.errors import ParseError
 
 
 class TestParseLine:

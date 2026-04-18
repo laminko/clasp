@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core.cli import ClaudeCLI
+from ..core.cli import CLI
 from .base import BaseAgent
 
 _RESEARCH_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch"]
@@ -17,7 +17,7 @@ class ResearchAgent(BaseAgent):
 
     def __init__(
         self,
-        cli: ClaudeCLI | None = None,
+        cli: CLI | None = None,
         *,
         model: str | None = None,
         system_prompt: str | None = None,

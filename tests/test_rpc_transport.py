@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_agent.rpc.transport import RpcTransport
-from claude_agent.utils.errors import CLIError, RpcError, TransportError
+from cckit.rpc.transport import RpcTransport
+from cckit.utils.errors import CLIError, RpcError, TransportError
 
 ECHO_SERVER = str(Path(__file__).parent / "fixtures" / "echo_rpc.py")
 

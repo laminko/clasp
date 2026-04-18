@@ -5,8 +5,8 @@ from datetime import datetime
 
 import pytest
 
-from claude_agent.session.history import MessageHistory
-from claude_agent.types.messages import Message, ToolUse
+from cckit.session.history import MessageHistory
+from cckit.types.messages import Message, ToolUse
 
 
 class TestMessageHistory:

@@ -5,8 +5,8 @@
 **Branch:** `main` (working tree, un-committed)
 **Scope:**
 
-- New files: `claude_agent/rpc/{protocol,transport,client,handlers}.py`, `claude_agent/streaming/acp_parser.py`, `claude_agent/session/acp_session.py`
-- Modified files: `claude_agent/utils/errors.py`, `claude_agent/core/config.py`, plus package `__init__.py` surfaces
+- New files: `cckit/rpc/{protocol,transport,client,handlers}.py`, `cckit/streaming/acp_parser.py`, `cckit/session/acp_session.py`
+- Modified files: `cckit/utils/errors.py`, `cckit/core/config.py`, plus package `__init__.py` surfaces
 - New tests: `tests/test_rpc_*.py`, `tests/test_acp_*.py`, `tests/integration/test_acp_lifecycle.py`, `tests/fixtures/echo_rpc.py`
 
 **Overall verdict:** Direction is solid. Layering is clean (protocol → transport → client → session), type hints and dataclasses are consistent, and the echo-server fixture is a nice touch for transport testing. However, there are **two blocker-class issues** (stderr-drain deadlock in `RpcTransport`, and an unsandboxed filesystem handler reachable over RPC), a handful of correctness bugs, and several smaller polish items. Do **not** merge in current form — the blockers are latent failures that will bite in production.
@@ -17,7 +17,7 @@
 
 ### 1.1 `RpcTransport` never drains the subprocess's stderr → deadlock on chatty child
 
-**File:** `claude_agent/rpc/transport.py:43-48`
+**File:** `cckit/rpc/transport.py:43-48`
 
 ```python
 self._proc = await asyncio.create_subprocess_exec(
@@ -38,7 +38,7 @@ Also: there is no test that exercises this. Add a fixture that writes a few MB t
 
 ### 1.2 Unsandboxed file I/O in `DefaultHandlers`
 
-**File:** `claude_agent/rpc/handlers.py:66-92`
+**File:** `cckit/rpc/handlers.py:66-92`
 
 ```python
 async def handle_file_read(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -92,7 +92,7 @@ Ship with the defaults **safe**; power users can relax.
 
 ### 2.3 `ACPClient.prompt()` uses `request()` with a 30 s default timeout
 
-**File:** `claude_agent/rpc/client.py:118-131`
+**File:** `cckit/rpc/client.py:118-131`
 
 ```python
 await self._transport.request(
@@ -110,7 +110,7 @@ Two issues rolled together:
 
 ### 2.4 `_handle_session_update` drops async callbacks silently
 
-**File:** `claude_agent/rpc/client.py:146-152`
+**File:** `cckit/rpc/client.py:146-152`
 
 ```python
 def _handle_session_update(self, params: dict[str, Any]) -> None:
@@ -127,7 +127,7 @@ If a user registers an `async def` callback, `cb(params)` returns a coroutine th
 
 ### 2.5 Concurrent `ACPSession.stream()` calls interleave
 
-**File:** `claude_agent/session/acp_session.py:147-174`
+**File:** `cckit/session/acp_session.py:147-174`
 
 Every call to `stream()` registers a callback that feeds **its own** queue, but the `ACPClient._session_update_callbacks` list is shared session-global. If two coroutines call `stream()` concurrently (e.g., an async pipeline that kicks off a second prompt before the first has drained), both queues receive every event, and the first `type == "result"` terminates **both** iterators regardless of which prompt produced it.
 
@@ -142,7 +142,7 @@ Also: the `finally` block reaches into `self._client._session_update_callbacks` 
 
 ### 2.6 `_events_to_response` never populates `Usage`
 
-**File:** `claude_agent/session/acp_session.py:204-229`
+**File:** `cckit/session/acp_session.py:204-229`
 
 ```python
 usage = Usage()
@@ -157,7 +157,7 @@ for event in events:
 
 ### 2.7 `parse_session_update`: speculative schema, stringified content
 
-**File:** `claude_agent/streaming/acp_parser.py`
+**File:** `cckit/streaming/acp_parser.py`
 
 Two concerns:
 
@@ -168,7 +168,7 @@ Two concerns:
 
 ### 2.8 `DefaultHandlers`: error responses look like success to the RPC layer
 
-**File:** `claude_agent/rpc/handlers.py:66-92`
+**File:** `cckit/rpc/handlers.py:66-92`
 
 Handlers return `{"error": "..."}` on failure. But in the transport, the return value is wrapped into a JSON-RPC `result`, not an `error`. The remote therefore sees a successful response whose body happens to contain an `error` field — it will **not** raise on the other side, and callers have to manually check. This is a protocol violation if the ACP contract expects proper JSON-RPC error shape.
 
@@ -176,16 +176,16 @@ Handlers return `{"error": "..."}` on failure. But in the transport, the return 
 
 ### 2.9 Default fall-through in `handle_permission` approves
 
-**File:** `claude_agent/rpc/handlers.py:45-64`
+**File:** `cckit/rpc/handlers.py:45-64`
 
 If `permission_policy=CALLBACK` but no callback is set, control falls through to `return {"approved": True}`. Denying by default would be safer — the current behavior converts a configuration error into silent auto-approval.
 
 ### 2.10 `TimeoutError` shadows the builtin without inheriting
 
-**File:** `claude_agent/utils/errors.py:27-29`
+**File:** `cckit/utils/errors.py:27-29`
 
 ```python
-class TimeoutError(ClaudeAgentError):  # noqa: A001
+class TimeoutError(CckitError):  # noqa: A001
     ...
 ```
 
@@ -195,7 +195,7 @@ The `# noqa: A001` suppresses the flake8 warning, but a user writing `except Tim
 
 ### 2.11 `ACPConfig.permission_policy` is `str`, not the enum
 
-**File:** `claude_agent/core/config.py:43`
+**File:** `cckit/core/config.py:43`
 
 ```python
 permission_policy: str = "auto_approve"

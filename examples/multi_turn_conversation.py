@@ -1,11 +1,11 @@
 """Multi-turn conversation with context preserved between turns."""
 import asyncio
 
-from claude_agent import ClaudeCLI, Session
+from cckit import CLI, Session
 
 
 async def main() -> None:
-    cli = ClaudeCLI()
+    cli = CLI()
     session = await Session.create(cli, bare=False)
 
     print("=== Multi-turn conversation ===\n")

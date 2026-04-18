@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from claude_agent import ClaudeCLI, CodeAgent, ConversationAgent, CustomAgent, ResearchAgent
-from claude_agent.agents.base import BaseAgent
-from claude_agent.core.config import SessionConfig
+from cckit import CLI, CodeAgent, ConversationAgent, CustomAgent, ResearchAgent
+from cckit.agents.base import BaseAgent
+from cckit.core.config import SessionConfig
 
 
 class TestAgentConfig:
-    def _make_cli(self) -> ClaudeCLI:
-        return ClaudeCLI(binary_path="/fake/claude")
+    def _make_cli(self) -> CLI:
+        return CLI(binary_path="/fake/claude")
 
     def test_code_agent_default_tools(self) -> None:
         agent = CodeAgent(cli=self._make_cli())

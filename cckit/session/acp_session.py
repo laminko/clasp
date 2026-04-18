@@ -90,7 +90,7 @@ class ACPSession:
         try:
             await client.initialize(
                 client_info={
-                    "name": cfg.client_name if config else "claude-agent",
+                    "name": cfg.client_name if config else "cckit",
                     "version": cfg.client_version if config else "0.1.0",
                 }
             )

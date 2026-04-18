@@ -10,7 +10,7 @@ import shutil
 
 import pytest
 
-from claude_agent.session.acp_session import ACPSession
+from cckit.session.acp_session import ACPSession
 
 pytestmark = pytest.mark.integration
 

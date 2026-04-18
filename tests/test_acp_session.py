@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from claude_agent.session.acp_session import ACPSession
-from claude_agent.streaming.events import ResultEvent, TextChunkEvent
-from claude_agent.types.responses import Response
+from cckit.session.acp_session import ACPSession
+from cckit.streaming.events import ResultEvent, TextChunkEvent
+from cckit.types.responses import Response
 
 
 class TestEventsToResponse:

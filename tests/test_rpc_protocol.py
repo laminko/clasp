@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from claude_agent.rpc.protocol import (
+from cckit.rpc.protocol import (
     INTERNAL_ERROR,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,

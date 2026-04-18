@@ -6,7 +6,7 @@ and asks Claude to list its contents using that server.
 import asyncio
 from pathlib import Path
 
-from claude_agent import ClaudeCLI, MCPManager, Session
+from cckit import CLI, MCPManager, Session
 
 
 async def main() -> None:
@@ -23,7 +23,7 @@ async def main() -> None:
     print(f"MCP config written to: {config_path}")
 
     try:
-        cli = ClaudeCLI()
+        cli = CLI()
         session = await Session.create(
             cli,
             bare=False,

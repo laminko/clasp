@@ -1,10 +1,10 @@
-"""Tests for ClaudeCLI and CommandBuilder."""
+"""Tests for CLI and CommandBuilder."""
 from __future__ import annotations
 
 import pytest
 
-from claude_agent import CLIConfig, ClaudeCLI, CommandBuilder, OutputFormat, PermissionMode
-from claude_agent.core.config import SessionConfig
+from cckit import CLIConfig, CLI, CommandBuilder, OutputFormat, PermissionMode
+from cckit.core.config import SessionConfig
 
 
 class TestCommandBuilder:
@@ -85,9 +85,9 @@ class TestCommandBuilder:
         assert cmd[idx + 1] == "3"
 
 
-class TestClaudeCLIBuildCommand:
-    def _make_cli(self) -> ClaudeCLI:
-        return ClaudeCLI(binary_path="/fake/claude")
+class TestCLIBuildCommand:
+    def _make_cli(self) -> CLI:
+        return CLI(binary_path="/fake/claude")
 
     def test_bare_default(self) -> None:
         cli = self._make_cli()

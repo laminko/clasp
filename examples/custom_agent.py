@@ -1,7 +1,7 @@
 """Custom agent with a user-defined system prompt."""
 import asyncio
 
-from claude_agent import CustomAgent
+from cckit import CustomAgent
 
 
 async def main() -> None:

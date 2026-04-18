@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
-from ..core.cli import ClaudeCLI
+from ..core.cli import CLI
 from ..core.config import SessionConfig
 from ..session.session import Session
 from ..streaming.events import Event
@@ -18,7 +18,7 @@ class BaseAgent(ABC):
 
     def __init__(
         self,
-        cli: ClaudeCLI | None = None,
+        cli: CLI | None = None,
         *,
         model: str | None = None,
         tools: list[str] | None = None,
@@ -26,7 +26,7 @@ class BaseAgent(ABC):
         bare: bool = True,
         binary_path: str = "~/.local/bin/claude",
     ) -> None:
-        self._cli = cli or ClaudeCLI(binary_path=binary_path)
+        self._cli = cli or CLI(binary_path=binary_path)
         self._model = model
         self._tools = tools
         self._system_prompt = system_prompt

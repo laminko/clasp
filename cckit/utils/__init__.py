@@ -1,7 +1,7 @@
 from .errors import (
     AuthError,
     CLIError,
-    ClaudeAgentError,
+    CckitError,
     ParseError,
     ProtocolError,
     RpcError,
@@ -14,7 +14,7 @@ from .helpers import expand_path, get_logger, safe_json_loads
 __all__ = [
     "AuthError",
     "CLIError",
-    "ClaudeAgentError",
+    "CckitError",
     "ParseError",
     "ProtocolError",
     "RpcError",

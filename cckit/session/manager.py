@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core.cli import ClaudeCLI
+from ..core.cli import CLI
 from ..core.config import SessionConfig
 from ..utils.helpers import get_logger
 from .session import Session
@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 class ConversationManager:
     """Manages a collection of named Sessions."""
 
-    def __init__(self, cli: ClaudeCLI) -> None:
+    def __init__(self, cli: CLI) -> None:
         self._cli = cli
         self._sessions: dict[str, Session] = {}
 

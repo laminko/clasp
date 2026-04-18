@@ -1,11 +1,11 @@
-"""Basic one-shot usage of ClaudeCLI."""
+"""Basic one-shot usage of CLI."""
 import asyncio
 
-from claude_agent import ClaudeCLI
+from cckit import CLI
 
 
 async def main() -> None:
-    cli = ClaudeCLI()
+    cli = CLI()
 
     response = await cli.execute(
         "What is 2 + 2? Answer in one line.",

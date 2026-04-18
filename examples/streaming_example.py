@@ -1,11 +1,11 @@
 """Stream events in real-time."""
 import asyncio
 
-from claude_agent import ClaudeCLI, TextChunkEvent, ToolUseEvent
+from cckit import CLI, TextChunkEvent, ToolUseEvent
 
 
 async def main() -> None:
-    cli = ClaudeCLI()
+    cli = CLI()
 
     print("Streaming response:\n")
     async for event in cli.execute_streaming(

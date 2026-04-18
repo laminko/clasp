@@ -68,7 +68,7 @@ class ACPClient:
         """Send the ``initialize`` handshake request."""
         params: dict[str, Any] = {
             "clientInfo": client_info
-            or {"name": "claude-agent", "version": "0.1.0"},
+            or {"name": "cckit", "version": "0.1.0"},
         }
         if capabilities:
             params["capabilities"] = capabilities

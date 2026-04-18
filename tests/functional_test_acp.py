@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from claude_agent import ACPSession, PermissionPolicy
-from claude_agent.streaming.events import (
+from cckit import ACPSession, PermissionPolicy
+from cckit.streaming.events import (
     MessageCompleteEvent,
     MessageStartEvent,
     ResultEvent,

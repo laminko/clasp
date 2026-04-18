@@ -1,11 +1,11 @@
 from typing import Any
 
 
-class ClaudeAgentError(Exception):
-    """Base exception for all claude_agent errors."""
+class CckitError(Exception):
+    """Base exception for all cckit errors."""
 
 
-class CLIError(ClaudeAgentError):
+class CLIError(CckitError):
     """Raised when the claude CLI process returns a non-zero exit code or stderr."""
 
     def __init__(
@@ -20,15 +20,15 @@ class AuthError(CLIError):
     """Raised when authentication fails."""
 
 
-class SessionError(ClaudeAgentError):
+class SessionError(CckitError):
     """Raised on session lifecycle errors."""
 
 
-class TimeoutError(ClaudeAgentError):  # noqa: A001
+class TimeoutError(CckitError):  # noqa: A001
     """Raised when a CLI call exceeds the configured timeout."""
 
 
-class ParseError(ClaudeAgentError):
+class ParseError(CckitError):
     """Raised when stream-json output cannot be parsed."""
 
     def __init__(self, message: str, raw: str = "") -> None:
@@ -36,11 +36,11 @@ class ParseError(ClaudeAgentError):
         self.raw = raw
 
 
-class TransportError(ClaudeAgentError):
+class TransportError(CckitError):
     """Raised when the RPC transport encounters a connection/pipe error."""
 
 
-class RpcError(ClaudeAgentError):
+class RpcError(CckitError):
     """Raised when the remote end returns a JSON-RPC error response."""
 
     def __init__(self, message: str, code: int = 0, data: Any = None) -> None:
@@ -49,5 +49,5 @@ class RpcError(ClaudeAgentError):
         self.data = data
 
 
-class ProtocolError(ClaudeAgentError):
+class ProtocolError(CckitError):
     """Raised on JSON-RPC protocol violations (malformed messages, unexpected state)."""

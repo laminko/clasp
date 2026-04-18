@@ -12,17 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from claude_agent.rpc.client import ACPClient
-from claude_agent.rpc.handlers import DefaultHandlers, PermissionPolicy
-from claude_agent.rpc.transport import RpcTransport
-from claude_agent.session.acp_session import ACPSession
-from claude_agent.streaming.events import (
+from cckit.rpc.client import ACPClient
+from cckit.rpc.handlers import DefaultHandlers, PermissionPolicy
+from cckit.rpc.transport import RpcTransport
+from cckit.session.acp_session import ACPSession
+from cckit.streaming.events import (
     MessageCompleteEvent,
     MessageStartEvent,
     ResultEvent,
     TextChunkEvent,
 )
-from claude_agent.types.responses import Response
+from cckit.types.responses import Response
 
 MOCK_SERVER = str(Path(__file__).parent / "fixtures" / "mock_acp_server.py")
 

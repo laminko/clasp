@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core.cli import ClaudeCLI
+from ..core.cli import CLI
 from .base import BaseAgent
 
 
@@ -11,7 +11,7 @@ class CustomAgent(BaseAgent):
         self,
         name: str = "CustomAgent",
         *,
-        cli: ClaudeCLI | None = None,
+        cli: CLI | None = None,
         system_prompt: str = "",
         tools: list[str] | None = None,
         model: str | None = None,

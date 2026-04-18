@@ -1,7 +1,7 @@
 # Security Review — ACP / JSON-RPC Transport
 
 **Branch:** `main`
-**Scope:** Pending changes introducing `claude_agent/rpc/*`, `claude_agent/session/acp_session.py`, `claude_agent/streaming/acp_parser.py`, plus edits to `core/config.py`, `utils/errors.py`, and package re-exports.
+**Scope:** Pending changes introducing `cckit/rpc/*`, `cckit/session/acp_session.py`, `cckit/streaming/acp_parser.py`, plus edits to `core/config.py`, `utils/errors.py`, and package re-exports.
 **Reviewer:** Security review (automated, thorough)
 **Date:** 2026-04-18
 
@@ -31,7 +31,7 @@ So the subprocess should be treated as **semi-trusted at best**. Anything it ask
 ## Critical
 
 ### C1. Default permission policy auto-approves every tool call
-**Files:** `claude_agent/rpc/handlers.py:39`, `claude_agent/session/acp_session.py:54,110`, `claude_agent/core/config.py:43`
+**Files:** `cckit/rpc/handlers.py:39`, `cckit/session/acp_session.py:54,110`, `cckit/core/config.py:43`
 
 `DefaultHandlers.__init__` defaults to `PermissionPolicy.AUTO_APPROVE`. `ACPSession.create()` and `ACPSession.connect()` both default to the same policy, and `ACPConfig.permission_policy = "auto_approve"`. Every `session/request_permission` call — including `Bash`, `Write`, network/MCP tools — returns `{"approved": True}` with no user confirmation and no audit surface beyond a debug log line.
 
@@ -47,7 +47,7 @@ The entire point of the permission prompt in the Claude CLI is to give the user 
 ---
 
 ### C2. Unrestricted filesystem read/write via `fs/read_text_file` and `fs/write_text_file`
-**Files:** `claude_agent/rpc/handlers.py:66-92`
+**Files:** `cckit/rpc/handlers.py:66-92`
 
 ```python
 path = Path(file_path)                  # no normalization, no confinement
@@ -82,7 +82,7 @@ The path comes from the subprocess and is used verbatim. Consequences:
 ## High
 
 ### H1. Resource leak on failed session initialization
-**Files:** `claude_agent/session/acp_session.py:87-102`, `127-131`
+**Files:** `cckit/session/acp_session.py:87-102`, `127-131`
 
 ```python
 await transport.start()                 # subprocess spawned
@@ -98,7 +98,7 @@ If `initialize()` or `new_session()` raises (timeout, protocol error, binary bug
 ---
 
 ### H2. Subprocess stderr is piped but never drained
-**File:** `claude_agent/rpc/transport.py:43-48`
+**File:** `cckit/rpc/transport.py:43-48`
 
 ```python
 self._proc = await asyncio.create_subprocess_exec(
@@ -116,7 +116,7 @@ Stderr from the subprocess is also the primary place auth/config errors surface;
 ---
 
 ### H3. Reader loop is serial — slow handlers stall the transport
-**File:** `claude_agent/rpc/transport.py:150-254`
+**File:** `cckit/rpc/transport.py:150-254`
 
 `_read_loop` awaits each `_on_message` call synchronously. If any request handler (`handle_file_read` on a large file, `handle_permission` with a blocking callback, `handle_file_write`) takes non-trivial time, the reader cannot process subsequent messages — including responses to our own pending requests. A malicious subprocess can issue one slow `fs/read_text_file` (e.g. on a FIFO or device) and freeze the transport; all other pending requests eventually hit the 30 s timeout.
 
@@ -125,7 +125,7 @@ Stderr from the subprocess is also the primary place auth/config errors surface;
 ---
 
 ### H4. Exception strings leaked to the remote end
-**Files:** `claude_agent/rpc/transport.py:229-234`, `claude_agent/rpc/handlers.py:74-78, 86-92`
+**Files:** `cckit/rpc/transport.py:229-234`, `cckit/rpc/handlers.py:74-78, 86-92`
 
 ```python
 resp = JsonRpcResponse(id=msg_id, error=JsonRpcError(code=-32603, message=str(exc)))
@@ -140,7 +140,7 @@ return {"error": str(exc)}
 ---
 
 ### H5. Reader loop swallows fatal errors silently
-**File:** `claude_agent/rpc/transport.py:173-184`
+**File:** `cckit/rpc/transport.py:173-184`
 
 `except Exception: logger.exception("Reader loop crashed")` leaves `_closed` unset until the `finally` clause runs, but the subprocess itself is not terminated. Callers with no pending future do not get any signal the transport is dead. `stop()` is now the user's responsibility and is never invoked automatically.
 
@@ -151,7 +151,7 @@ return {"error": str(exc)}
 ## Medium
 
 ### M1. JSON-RPC ID type is not validated on incoming responses
-**File:** `claude_agent/rpc/transport.py:188,193`
+**File:** `cckit/rpc/transport.py:188,193`
 
 `_pending` is keyed by `int`, but `data.get("id")` may be a JSON string, float, or null. If a server ever responds with `"id": "1"`, the lookup silently fails and the request eventually times out with no diagnostic. This also means a non-standard `id` can be used to exhaust `_pending` entries (pile-up of never-resolved futures — memory growth).
 
@@ -160,7 +160,7 @@ return {"error": str(exc)}
 ---
 
 ### M2. Unbounded line length in reader
-**File:** `claude_agent/rpc/transport.py:156`
+**File:** `cckit/rpc/transport.py:156`
 
 `await self._proc.stdout.readline()` has no length limit. A hostile or malfunctioning subprocess can send a multi-GB line (e.g. binary file content base64-encoded) and the transport attempts to buffer it all. Asyncio's default `limit` is 64 KB and overflow raises `LimitOverrunError`, which is caught by the broad `Exception` handler and silently crashes the reader loop (see H5).
 
@@ -169,7 +169,7 @@ return {"error": str(exc)}
 ---
 
 ### M3. `expand_path` resolves through symlinks silently
-**Files:** `claude_agent/utils/helpers.py:9-11`, `claude_agent/session/acp_session.py:68,113`
+**Files:** `cckit/utils/helpers.py:9-11`, `cckit/session/acp_session.py:68,113`
 
 ```python
 return str(Path(os.path.expandvars(os.path.expanduser(path))).resolve())
@@ -182,7 +182,7 @@ return str(Path(os.path.expandvars(os.path.expanduser(path))).resolve())
 ---
 
 ### M4. `PermissionPolicy.CALLBACK` with no callback silently approves
-**File:** `claude_agent/rpc/handlers.py:55-64`
+**File:** `cckit/rpc/handlers.py:55-64`
 
 ```python
 if (self.permission_policy == PermissionPolicy.CALLBACK
@@ -198,7 +198,7 @@ If `policy=CALLBACK` is set but `permission_callback=None`, control falls throug
 ---
 
 ### M5. `ACPConfig.permission_policy` is a string, parsed unsafely
-**File:** `claude_agent/session/acp_session.py:82`
+**File:** `cckit/session/acp_session.py:82`
 
 ```python
 permission_policy=PermissionPolicy(cfg.permission_policy),
@@ -211,7 +211,7 @@ If a user loads `ACPConfig` from a YAML/JSON file and mistypes the policy (`"aut
 ---
 
 ### M6. Subprocess inherits full parent environment
-**File:** `claude_agent/rpc/transport.py:43-48`
+**File:** `cckit/rpc/transport.py:43-48`
 
 `create_subprocess_exec` is called without `env=`, so the child inherits everything in `os.environ` — `ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, etc. For the real `claude` binary this is expected, but any plausibly-compromised or swapped binary (see M3) instantly exfiltrates all of them. The blast radius of the binary-substitution attack is therefore "every secret in the user's environment."
 
@@ -220,7 +220,7 @@ If a user loads `ACPConfig` from a YAML/JSON file and mistypes the policy (`"aut
 ---
 
 ### M7. Private attribute reach-through breaks encapsulation and can race
-**File:** `claude_agent/session/acp_session.py:172-174`
+**File:** `cckit/session/acp_session.py:172-174`
 
 ```python
 if on_update in self._client._session_update_callbacks:

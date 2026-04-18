@@ -17,7 +17,7 @@ from .process import ProcessManager
 logger = get_logger(__name__)
 
 
-class ClaudeCLI:
+class CLI:
     """High-level async wrapper around the claude CLI binary."""
 
     def __init__(

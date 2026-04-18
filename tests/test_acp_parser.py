@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from claude_agent.streaming.acp_parser import parse_session_update
-from claude_agent.streaming.events import (
+from cckit.streaming.acp_parser import parse_session_update
+from cckit.streaming.events import (
     MessageCompleteEvent,
     MessageStartEvent,
     ResultEvent,

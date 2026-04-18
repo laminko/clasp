@@ -1,4 +1,4 @@
-"""claude_agent — high-level async framework for the Claude Code CLI."""
+"""cckit — high-level async framework for the Claude Code CLI."""
 
 from .agents import (
     BaseAgent,
@@ -7,7 +7,7 @@ from .agents import (
     CustomAgent,
     ResearchAgent,
 )
-from .core import ACPConfig, CLIConfig, ClaudeCLI, CommandBuilder, SessionConfig
+from .core import ACPConfig, CLIConfig, CLI, CommandBuilder, SessionConfig
 from .mcp import MCPManager, MCPServer
 from .rpc import ACPClient, PermissionPolicy, RpcTransport
 from .session import ACPSession, ConversationManager, MessageHistory, Session
@@ -31,7 +31,7 @@ from .types import (
 from .utils import (
     AuthError,
     CLIError,
-    ClaudeAgentError,
+    CckitError,
     ParseError,
     ProtocolError,
     RpcError,
@@ -44,7 +44,7 @@ __all__ = [
     # core
     "ACPConfig",
     "CLIConfig",
-    "ClaudeCLI",
+    "CLI",
     "CommandBuilder",
     "SessionConfig",
     # session
@@ -83,7 +83,7 @@ __all__ = [
     # errors
     "AuthError",
     "CLIError",
-    "ClaudeAgentError",
+    "CckitError",
     "ParseError",
     "ProtocolError",
     "RpcError",

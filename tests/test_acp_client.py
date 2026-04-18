@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from claude_agent.rpc.client import ACPClient
-from claude_agent.rpc.handlers import DefaultHandlers, PermissionPolicy
-from claude_agent.rpc.transport import RpcTransport
+from cckit.rpc.client import ACPClient
+from cckit.rpc.handlers import DefaultHandlers, PermissionPolicy
+from cckit.rpc.transport import RpcTransport
 
 ECHO_SERVER = str(Path(__file__).parent / "fixtures" / "echo_rpc.py")
 
