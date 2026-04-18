@@ -151,7 +151,7 @@ Permission policies: `AUTO_APPROVE`, `AUTO_DENY` (default), `CALLBACK` (supply y
 
 File read/write callbacks from the agent are confined to a workspace root (defaults to the current directory), reject symlinks, and enforce a 10 MiB read cap.
 
-Lower-level building blocks (`RpcTransport`, `ACPClient`, `DefaultHandlers`) are also exported if you need them.
+Lower-level building blocks are available: `RpcTransport`, `ACPClient`, and `PermissionPolicy` from `cckit`; `DefaultHandlers` from `cckit.rpc`.
 
 ## Project layout
 
@@ -164,7 +164,7 @@ cckit/
 ├── mcp/         # MCPServer, MCPManager
 ├── rpc/         # RpcTransport, ACPClient, DefaultHandlers, PermissionPolicy
 ├── types/       # Response, AgentResult, Message, Usage, OutputFormat, PermissionMode
-└── utils/       # errors (CLIError, RpcError, TransportError, ...), helpers
+└── utils/       # errors (CckitError base + CLIError, AuthError, RpcError, TransportError, ...), helpers
 ```
 
 ## Tests
