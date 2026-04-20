@@ -8,7 +8,7 @@ from .agents import (
     ResearchAgent,
 )
 from .core import ACPConfig, CLIConfig, CLI, CommandBuilder, SessionConfig
-from .mcp import MCPManager, MCPServer
+from .mcp import FastMCP, MCPManager, MCPServer
 from .rpc import ACPClient, PermissionPolicy, RpcTransport
 from .session import ACPSession, ConversationManager, MessageHistory, Session
 from .streaming import (
@@ -63,6 +63,7 @@ __all__ = [
     "CustomAgent",
     "ResearchAgent",
     # mcp
+    "FastMCP",
     "MCPManager",
     "MCPServer",
     # streaming

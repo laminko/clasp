@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,48 @@ class MCPManager:
             env=env or {},
         )
         return self
+
+    def add_python_server(
+        self,
+        name: str,
+        *,
+        script: str | Path | None = None,
+        module: str | None = None,
+        python: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> "MCPManager":
+        """Register a Python MCP server.
+
+        Provide exactly one of ``script`` (path to a ``.py`` file) or
+        ``module`` (dotted module name runnable with ``python -m``).
+
+        ``python`` defaults to the interpreter running the current process;
+        override when the server needs a different virtualenv.
+
+        Example::
+
+            mcp.add_python_server("math-tools", script="examples/mcp_servers/math_tools.py")
+            mcp.add_python_server("math-tools", module="my_pkg.mcp_server")
+        """
+        if bool(script) == bool(module):
+            raise ValueError("Pass exactly one of script= or module=")
+
+        cmd_args: list[str]
+        if module:
+            cmd_args = ["-m", module]
+        else:
+            assert script is not None
+            cmd_args = [str(Path(script).expanduser().resolve())]
+        if args:
+            cmd_args.extend(args)
+
+        return self.add_server(
+            name,
+            command=python or sys.executable,
+            args=cmd_args,
+            env=env,
+        )
 
     def remove_server(self, name: str) -> None:
         self._servers.pop(name, None)
