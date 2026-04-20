@@ -141,6 +141,31 @@ finally:
     mcp.cleanup()
 ```
 
+#### Writing your own tools in Python
+
+Expose any Python function as a tool Claude can call. See [`docs/custom-tools.md`](./docs/custom-tools.md) for the full guide.
+
+```python
+# my_tools.py
+from cckit import FastMCP
+
+server = FastMCP("my-tools")
+
+@server.tool(description="Look up a user by ID.")
+def lookup_user(user_id: str) -> dict:
+    return {"id": user_id, "name": "Alice"}
+
+if __name__ == "__main__":
+    server.run()
+```
+
+Register it and call through cckit:
+
+```python
+mcp.add_python_server("my-tools", script="my_tools.py")
+tools = ["mcp__my-tools__lookup_user"]
+```
+
 ### ACP: persistent bidirectional sessions
 
 `ACPSession` keeps one `claude` subprocess alive and speaks JSON-RPC 2.0 over stdio (Agent Communication Protocol). This lets the agent call back into your code for permission checks, file reads, and file writes, and lets you cancel an in-flight prompt.

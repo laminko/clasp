@@ -234,15 +234,42 @@ MCPManager()
 MCPManager.add_server(name: str, command: str,
                       args: list[str] | None = None,
                       env: dict[str, str] | None = None) -> MCPManager    # chainable
+MCPManager.add_python_server(name: str, *,
+                             script: str | Path | None = None,
+                             module: str | None = None,
+                             python: str | None = None,         # defaults to sys.executable
+                             args: list[str] | None = None,
+                             env: dict[str, str] | None = None) -> MCPManager   # chainable
 MCPManager.remove_server(name: str) -> None
 MCPManager.to_config() -> dict                             # {"mcpServers": {...}}
 MCPManager.write_config_file(path=None) -> str             # path (temp file if None)
 MCPManager.cleanup() -> None                               # deletes temp file
 ```
 
+`add_python_server` is a convenience for registering a Python-authored MCP server without hand-writing the `python -m module` / `python path/to/script.py` invocation. Pass exactly one of `script=` or `module=`.
+
 ### `class MCPServer`
 
 Immutable holder for one server's config: `name`, `command`, `args`, `env`. Produced by `MCPManager.add_server`.
+
+### `class FastMCP`
+
+Re-exported from [`mcp.server.fastmcp`](https://pypi.org/project/mcp/). Use it to define tools in your own Python file; the file then becomes a subprocess Claude calls over stdio.
+
+```python
+from cckit import FastMCP
+
+server = FastMCP("my-tools")
+
+@server.tool(description="...")
+def my_tool(arg: str) -> dict:
+    ...
+
+if __name__ == "__main__":
+    server.run()
+```
+
+Parameter JSON schema is auto-generated from type hints. Async functions, Pydantic models, and raised exceptions all work as expected. See [`docs/custom-tools.md`](./custom-tools.md) for the full pattern.
 
 ---
 

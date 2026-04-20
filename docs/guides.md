@@ -122,6 +122,25 @@ MCP tool names follow the pattern `mcp__<server>__<tool>`.
 
 Full example: [`examples/mcp_integration.py`](../examples/mcp_integration.py)
 
+### Writing your own tools in Python
+
+Expose any Python function as a tool Claude can call. See [custom-tools.md](./custom-tools.md) for the full pattern and runnable example.
+
+```python
+from cckit import FastMCP
+
+server = FastMCP("my-tools")
+
+@server.tool(description="Look up a user by ID.")
+def lookup_user(user_id: str) -> dict:
+    return {"id": user_id, "name": "Alice"}
+
+if __name__ == "__main__":
+    server.run()
+```
+
+Register it with `MCPManager.add_python_server("my-tools", script="my_tools.py")`.
+
 ## Persistent ACP session
 
 `ACPSession` keeps one `claude` subprocess alive, enabling permissions, cancellation, and file callbacks.
