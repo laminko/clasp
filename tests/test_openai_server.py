@@ -440,3 +440,102 @@ def test_build_prompt_multimodal_image_elided():
     assert "what is this?" in user
     assert "[image:" in user  # placeholder for image
     assert "cat.png" in user or "https://example.com" in user  # url snippet preserved
+
+
+async def _drain(gen):
+    out = []
+    async for ev in gen:
+        out.append(ev)
+    return out
+
+
+async def _from_chunks(chunks):
+    for c in chunks:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_parse_passthrough_when_tools_off():
+    from examples.openai_server import parse_envelope_stream
+    events = await _drain(parse_envelope_stream(_from_chunks(["hello ", "world"]), tools_present=False))
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["text_delta", "text_delta", "finish"]
+    assert events[0]["text"] == "hello "
+    assert events[1]["text"] == "world"
+    assert events[-1]["reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_empty_tool_calls_then_content():
+    from examples.openai_server import parse_envelope_stream
+    text = "<<<TOOL_CALLS>>>[]<<</TOOL_CALLS>>><<<CONTENT>>>hi there<<</CONTENT>>>"
+    events = await _drain(parse_envelope_stream(_from_chunks([text]), tools_present=True))
+    kinds = [e["kind"] for e in events]
+    assert "text_delta" in kinds
+    assert events[-1]["kind"] == "finish"
+    assert events[-1]["reason"] == "stop"
+    text_emitted = "".join(e["text"] for e in events if e["kind"] == "text_delta")
+    assert text_emitted == "hi there"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_one_tool_call():
+    from examples.openai_server import parse_envelope_stream
+    text = ('<<<TOOL_CALLS>>>[{"id":"call_1","name":"get_weather","arguments":{"city":"Paris"}}]'
+            '<<</TOOL_CALLS>>><<<CONTENT>>><<</CONTENT>>>')
+    events = await _drain(parse_envelope_stream(_from_chunks([text]), tools_present=True))
+    tc_events = [e for e in events if e["kind"] == "tool_calls"]
+    assert len(tc_events) == 1
+    assert tc_events[0]["calls"] == [{"id": "call_1", "name": "get_weather",
+                                       "arguments": {"city": "Paris"}}]
+    assert events[-1]["reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_tag_split_across_chunks():
+    from examples.openai_server import parse_envelope_stream
+    chunks = ["<<<TOOL", "_CALLS>>>[]<<", "</TOOL_CALLS>>>", "<<<CONTENT>>>ok<<</CONTENT>>>"]
+    events = await _drain(parse_envelope_stream(_from_chunks(chunks), tools_present=True))
+    text_emitted = "".join(e["text"] for e in events if e["kind"] == "text_delta")
+    assert text_emitted == "ok"
+    assert events[-1]["reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_malformed_json_emits_error():
+    from examples.openai_server import parse_envelope_stream
+    text = "<<<TOOL_CALLS>>>[not json]<<</TOOL_CALLS>>><<<CONTENT>>>x<<</CONTENT>>>"
+    events = await _drain(parse_envelope_stream(_from_chunks([text]), tools_present=True))
+    error = next(e for e in events if e["kind"] == "error")
+    assert error["code"] == "bridge_parse_error"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_missing_envelope_emits_error():
+    from examples.openai_server import parse_envelope_stream
+    chunks = ["just plain text without any tags"]
+    events = await _drain(parse_envelope_stream(_from_chunks(chunks), tools_present=True))
+    error = next(e for e in events if e["kind"] == "error")
+    assert error["code"] == "bridge_envelope_missing"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_strips_markdown_fence():
+    from examples.openai_server import parse_envelope_stream
+    text = "<<<TOOL_CALLS>>>```json\n[]\n```<<</TOOL_CALLS>>><<<CONTENT>>>x<<</CONTENT>>>"
+    events = await _drain(parse_envelope_stream(_from_chunks([text]), tools_present=True))
+    assert not any(e["kind"] == "error" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_multiple_parallel_tool_calls():
+    from examples.openai_server import parse_envelope_stream
+    text = ('<<<TOOL_CALLS>>>['
+            '{"id":"call_1","name":"a","arguments":{}},'
+            '{"id":"call_2","name":"b","arguments":{"x":1}}'
+            ']<<</TOOL_CALLS>>><<<CONTENT>>><<</CONTENT>>>')
+    events = await _drain(parse_envelope_stream(_from_chunks([text]), tools_present=True))
+    tc = next(e for e in events if e["kind"] == "tool_calls")
+    assert len(tc["calls"]) == 2
+    assert tc["calls"][0]["name"] == "a"
+    assert tc["calls"][1]["name"] == "b"

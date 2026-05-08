@@ -29,6 +29,7 @@ import hmac
 import os
 import re
 import secrets
+from collections.abc import AsyncIterator
 from typing import Any, Literal, Union
 
 from fastapi import FastAPI, Header, HTTPException
@@ -354,3 +355,150 @@ def build_prompt(req: "ChatCompletionRequest") -> tuple[str, str]:
 
 
 app = FastAPI(title="OCES", version="0.1.0")
+
+
+TOOL_OPEN = "<<<TOOL_CALLS>>>"
+TOOL_CLOSE = "<<</TOOL_CALLS>>>"
+CONT_OPEN = "<<<CONTENT>>>"
+CONT_CLOSE = "<<</CONTENT>>>"
+TAGS = (TOOL_OPEN, TOOL_CLOSE, CONT_OPEN, CONT_CLOSE)
+TAG_MAX = max(len(t) for t in TAGS)
+
+
+def _strip_md_fence(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```json"):
+        s = s[len("```json"):].lstrip("\n")
+    elif s.startswith("```"):
+        s = s[3:].lstrip("\n")
+    if s.endswith("```"):
+        s = s[:-3].rstrip("\n")
+    return s
+
+
+async def parse_envelope_stream(
+    chunks: AsyncIterator[str], tools_present: bool
+) -> AsyncIterator[dict]:
+    """Pure-ish state machine that consumes claude text chunks and emits parser events.
+
+    Events are dicts of one of these shapes:
+      {"kind": "text_delta", "text": "..."}
+      {"kind": "tool_calls", "calls": [{"id":..., "name":..., "arguments": {...}}]}
+      {"kind": "finish", "reason": "stop" | "tool_calls" | "length"}
+      {"kind": "error", "code": "bridge_parse_error" | "bridge_envelope_missing", "message": "..."}
+    """
+    if not tools_present:
+        async for chunk in chunks:
+            if chunk:
+                yield {"kind": "text_delta", "text": chunk}
+        yield {"kind": "finish", "reason": "stop"}
+        return
+
+    state = 0
+    buf = ""
+    tool_buf = ""
+    saw_any_tag = False
+    finish_reason = "stop"
+    tool_calls: list[dict] = []
+
+    async for chunk in chunks:
+        buf += chunk
+        progressed = True
+        while progressed:
+            progressed = False
+            if state == 0:
+                idx = buf.find(TOOL_OPEN)
+                if idx != -1:
+                    buf = buf[idx + len(TOOL_OPEN):]
+                    state = 1
+                    saw_any_tag = True
+                    progressed = True
+                else:
+                    # retain only the tail that could start a tag
+                    if len(buf) > TAG_MAX:
+                        buf = buf[-(TAG_MAX - 1):]
+                    break
+            elif state == 1:
+                idx = buf.find(TOOL_CLOSE)
+                if idx != -1:
+                    tool_buf += buf[:idx]
+                    buf = buf[idx + len(TOOL_CLOSE):]
+                    state = 2
+                    progressed = True
+                    # parse tool_buf
+                    raw = _strip_md_fence(tool_buf)
+                    try:
+                        parsed = _json.loads(raw) if raw else []
+                        if not isinstance(parsed, list):
+                            raise ValueError("tool_calls must be a JSON array")
+                        tool_calls = parsed
+                    except Exception as exc:
+                        yield {"kind": "error",
+                               "code": "bridge_parse_error",
+                               "message": f"Malformed tool_calls JSON: {exc}"}
+                        return
+                else:
+                    # retain everything except the tail that could be a partial close-tag
+                    if len(buf) > TAG_MAX:
+                        tool_buf += buf[:-(TAG_MAX - 1)]
+                        buf = buf[-(TAG_MAX - 1):]
+                    break
+            elif state == 2:
+                idx = buf.find(CONT_OPEN)
+                if idx != -1:
+                    buf = buf[idx + len(CONT_OPEN):]
+                    state = 3
+                    progressed = True
+                else:
+                    if len(buf) > TAG_MAX:
+                        buf = buf[-(TAG_MAX - 1):]
+                    break
+            elif state == 3:
+                idx = buf.find(CONT_CLOSE)
+                if idx != -1:
+                    if idx > 0:
+                        yield {"kind": "text_delta", "text": buf[:idx]}
+                    buf = buf[idx + len(CONT_CLOSE):]
+                    state = 4
+                    progressed = True
+                else:
+                    if len(buf) > TAG_MAX:
+                        emit = buf[:-(TAG_MAX - 1)]
+                        buf = buf[-(TAG_MAX - 1):]
+                        if emit:
+                            yield {"kind": "text_delta", "text": emit}
+                    break
+            else:  # state 4: done, drain
+                buf = ""
+                break
+
+    # End of stream cleanup
+    if state == 3 and buf:
+        # CONTENT close never arrived — emit remaining buffer as content
+        yield {"kind": "text_delta", "text": buf}
+
+    if not saw_any_tag:
+        yield {"kind": "error",
+               "code": "bridge_envelope_missing",
+               "message": "Upstream model did not emit the required <<<TOOL_CALLS>>> envelope"}
+        return
+
+    # Emit tool_calls if any
+    if tool_calls:
+        # Normalize: ensure each call has id/name/arguments
+        normalized = []
+        for c in tool_calls:
+            if not isinstance(c, dict) or "name" not in c:
+                yield {"kind": "error",
+                       "code": "bridge_parse_error",
+                       "message": "tool_call missing required field: name"}
+                return
+            normalized.append({
+                "id": c.get("id") or f"call_{secrets.token_hex(6)}",
+                "name": c["name"],
+                "arguments": c.get("arguments", {}),
+            })
+        yield {"kind": "tool_calls", "calls": normalized}
+        finish_reason = "tool_calls"
+
+    yield {"kind": "finish", "reason": finish_reason}
