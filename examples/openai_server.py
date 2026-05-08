@@ -237,4 +237,120 @@ def verify_bearer(authorization: str = Header(default="")) -> None:
         raise HTTPException(401, _err("invalid_request_error", "Invalid API key"))
 
 
+import json as _json
+
+
+def _render_content(content: Union[str, list, None]) -> str:
+    """Render a message's content (str | list of parts | None) as plain text. Images elided."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for p in content:
+        if isinstance(p, TextContentPart):
+            parts.append(p.text)
+        elif isinstance(p, ImageContentPart):
+            url = p.image_url.url
+            short = url[:80] + ("…" if len(url) > 80 else "")
+            parts.append(f"[image: {short}]")
+    return "\n".join(parts)
+
+
+def _envelope_instructions(req: "ChatCompletionRequest") -> str:
+    tools_block = []
+    for t in req.tools or []:
+        f = t.function
+        params = _json.dumps(f.parameters or {}, indent=2)
+        tools_block.append(f"- name: {f.name}\n  description: {f.description or ''}\n  parameters: {params}")
+    tools_str = "\n".join(tools_block)
+
+    tc = req.tool_choice
+    if tc == "none":
+        tc_rule = 'tool_choice="none": do NOT emit any tool calls; tool_calls must be [].'
+    elif tc == "required":
+        tc_rule = 'tool_choice="required": emit at least one tool call.'
+    elif isinstance(tc, ToolChoiceObject):
+        tc_rule = f'tool_choice=function "{tc.function.name}": emit exactly one tool call to that function.'
+    else:
+        tc_rule = 'tool_choice="auto" (default): use a tool when helpful, otherwise reply directly.'
+
+    parallel_rule = (
+        "parallel_tool_calls=true: you may emit multiple tool calls in one turn."
+        if req.parallel_tool_calls
+        else "parallel_tool_calls=false: emit at most one tool call per turn."
+    )
+
+    return f"""
+You will reply in EXACTLY this format. No prose before or after.
+
+<<<TOOL_CALLS>>>
+<JSON array of tool calls, or [] if you are not calling any tool>
+<<</TOOL_CALLS>>>
+<<<CONTENT>>>
+<your natural-language reply, possibly empty if a tool was called>
+<<</CONTENT>>>
+
+Each tool call is: {{"id":"call_<short-hex>","name":"<tool_name>","arguments":<JSON object>}}
+Use double quotes everywhere. Do not wrap in markdown fences.
+
+Available tools:
+{tools_str}
+
+Tool selection rules:
+- {tc_rule}
+- {parallel_rule}
+""".strip()
+
+
+def _response_format_instructions(rf: ResponseFormat | None) -> str:
+    if not rf or rf.type == "text":
+        return ""
+    if rf.type == "json_object":
+        return "Reply with a single valid JSON object only. No prose, no code fences."
+    # json_schema
+    schema = (rf.json_schema or {}).get("schema", {})
+    return (
+        "Reply with a single valid JSON object only, conforming to this JSON Schema:\n"
+        + _json.dumps(schema, indent=2)
+        + "\nNo prose, no code fences."
+    )
+
+
+def build_prompt(req: "ChatCompletionRequest") -> tuple[str, str]:
+    """Pure: flatten messages[] into (system_prompt, user_prompt) for claude."""
+    system_parts: list[str] = []
+    transcript_parts: list[str] = []
+
+    for msg in req.messages:
+        rendered = _render_content(msg.content)
+        if msg.role in ("system", "developer"):
+            if rendered:
+                system_parts.append(rendered)
+        elif msg.role == "user":
+            transcript_parts.append(f"[User]: {rendered}")
+        elif msg.role == "assistant":
+            line = f"[Assistant]: {rendered}"
+            if msg.tool_calls:
+                tc_str = _json.dumps([
+                    {"id": tc.id, "name": tc.function.name,
+                     "arguments": _json.loads(tc.function.arguments) if tc.function.arguments else {}}
+                    for tc in msg.tool_calls
+                ])
+                line = f"[Assistant]: <<<TOOL_CALLS>>>{tc_str}<<</TOOL_CALLS>>><<<CONTENT>>>{rendered}<<</CONTENT>>>"
+            transcript_parts.append(line)
+        elif msg.role == "tool":
+            transcript_parts.append(f"[Tool {msg.tool_call_id} result]: {rendered}")
+
+    sys_prompt = "\n\n".join(system_parts)
+    if req.tools:
+        sys_prompt = (sys_prompt + "\n\n" if sys_prompt else "") + _envelope_instructions(req)
+    rf_instr = _response_format_instructions(req.response_format)
+    if rf_instr:
+        sys_prompt = (sys_prompt + "\n\n" if sys_prompt else "") + rf_instr
+
+    user_prompt = "\n".join(transcript_parts) + "\n[Assistant]: "
+    return sys_prompt, user_prompt
+
+
 app = FastAPI(title="OCES", version="0.1.0")

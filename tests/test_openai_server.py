@@ -337,3 +337,106 @@ def test_verify_bearer_correct_with_whitespace(monkeypatch):
     from examples.openai_server import verify_bearer, _OCESConfig
     monkeypatch.setattr(_OCESConfig, "api_key", "secret")
     assert verify_bearer("Bearer  secret  ") is None  # tolerant of trailing/leading ws on token
+
+
+def test_build_prompt_simple():
+    from examples.openai_server import build_prompt
+    sys, user = build_prompt(_req(messages=[
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "hi"},
+    ]))
+    assert sys == "You are helpful."
+    assert "[User]: hi" in user
+    assert user.rstrip().endswith("[Assistant]:")
+
+
+def test_build_prompt_developer_role_joined_to_system():
+    from examples.openai_server import build_prompt
+    sys, _ = build_prompt(_req(messages=[
+        {"role": "developer", "content": "Be concise."},
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "hi"},
+    ]))
+    assert "Be concise." in sys
+    assert "You are helpful." in sys
+
+
+def test_build_prompt_with_tools_includes_envelope_instructions():
+    from examples.openai_server import build_prompt
+    sys, _ = build_prompt(_req(
+        messages=[{"role": "user", "content": "weather?"}],
+        tools=[{
+            "type": "function",
+            "function": {"name": "get_weather", "description": "Gets weather",
+                         "parameters": {"type": "object"}},
+        }],
+        tool_choice="auto",
+    ))
+    assert "<<<TOOL_CALLS>>>" in sys
+    assert "<<<CONTENT>>>" in sys
+    assert "get_weather" in sys
+    assert "Gets weather" in sys
+    assert "tool_choice" in sys.lower()
+
+
+def test_build_prompt_no_tools_no_envelope():
+    from examples.openai_server import build_prompt
+    sys, _ = build_prompt(_req())
+    assert "<<<TOOL_CALLS>>>" not in sys
+
+
+def test_build_prompt_response_format_json_object():
+    from examples.openai_server import build_prompt
+    sys, _ = build_prompt(_req(response_format={"type": "json_object"}))
+    assert "JSON" in sys.upper()
+
+
+def test_build_prompt_response_format_json_schema_includes_schema():
+    from examples.openai_server import build_prompt
+    sys, _ = build_prompt(_req(response_format={
+        "type": "json_schema",
+        "json_schema": {"schema": {"type": "object", "properties": {"x": {"type": "string"}}}},
+    }))
+    assert "JSON" in sys.upper()
+    assert '"type":"object"' in sys.replace(" ", "") or '"type": "object"' in sys
+
+
+def test_build_prompt_assistant_history_rendered():
+    from examples.openai_server import build_prompt
+    _, user = build_prompt(_req(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello!"},
+        {"role": "user", "content": "how are you?"},
+    ]))
+    assert "[User]: hi" in user
+    assert "[Assistant]: hello!" in user
+    assert "[User]: how are you?" in user
+    assert user.rstrip().endswith("[Assistant]:")
+
+
+def test_build_prompt_tool_role_rendered():
+    from examples.openai_server import build_prompt
+    _, user = build_prompt(_req(messages=[
+        {"role": "user", "content": "weather?"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "call_1", "type": "function",
+                         "function": {"name": "get_weather",
+                                      "arguments": "{\"city\":\"Paris\"}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "22°C, sunny"},
+        {"role": "user", "content": "thanks"},
+    ]))
+    assert "[Tool call_1 result]: 22°C, sunny" in user
+
+
+def test_build_prompt_multimodal_image_elided():
+    from examples.openai_server import build_prompt
+    _, user = build_prompt(_req(messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+        ],
+    }]))
+    assert "what is this?" in user
+    assert "[image:" in user  # placeholder for image
+    assert "cat.png" in user or "https://example.com" in user  # url snippet preserved
