@@ -25,6 +25,106 @@ Tested with openai>=1.0, raw httpx, and curl.
 """
 from __future__ import annotations
 
+from typing import Any, Literal, Union
+
 from fastapi import FastAPI
+from pydantic import BaseModel, ConfigDict
+
+
+class TextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ImageURL(BaseModel):
+    url: str
+    detail: Literal["auto", "low", "high"] = "auto"
+
+
+class ImageContentPart(BaseModel):
+    type: Literal["image_url"]
+    image_url: ImageURL
+
+
+ContentPart = Union[TextContentPart, ImageContentPart]
+
+
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool", "developer"]
+    content: Union[str, list[ContentPart], None] = None
+    name: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
+
+
+class FunctionDef(BaseModel):
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] | None = None
+    strict: bool = False
+
+
+class Tool(BaseModel):
+    type: Literal["function"]
+    function: FunctionDef
+
+
+class ToolChoiceFunction(BaseModel):
+    name: str
+
+
+class ToolChoiceObject(BaseModel):
+    type: Literal["function"]
+    function: ToolChoiceFunction
+
+
+ToolChoice = Union[Literal["none", "auto", "required"], ToolChoiceObject]
+
+
+class ResponseFormat(BaseModel):
+    type: Literal["text", "json_object", "json_schema"] = "text"
+    json_schema: dict[str, Any] | None = None
+
+
+class StreamOptions(BaseModel):
+    include_usage: bool = False
+
+
+class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    model: str
+    messages: list[ChatMessage]
+    temperature: float | None = None
+    top_p: float | None = None
+    n: int = 1
+    stream: bool = False
+    stream_options: StreamOptions | None = None
+    stop: Union[str, list[str], None] = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool = False
+    top_logprobs: int | None = None
+    user: str | None = None
+    seed: int | None = None
+    response_format: ResponseFormat | None = None
+    tools: list[Tool] | None = None
+    tool_choice: ToolChoice | None = None
+    parallel_tool_calls: bool = True
+
 
 app = FastAPI(title="OCES", version="0.1.0")
