@@ -289,3 +289,51 @@ def test_validate_json_schema_missing_schema():
     err = validate_request(_req(response_format={"type": "json_schema"}))
     assert err is not None and err.status_code == 400
     assert "json_schema" in err.detail["error"]["message"]
+
+
+from fastapi import HTTPException
+
+
+def test_verify_bearer_no_api_key_set(monkeypatch):
+    from examples.openai_server import verify_bearer, _OCESConfig
+    monkeypatch.setattr(_OCESConfig, "api_key", "")
+    with pytest.raises(HTTPException) as exc:
+        verify_bearer("Bearer xxx")
+    assert exc.value.status_code == 500
+    assert "API_KEY not configured" in exc.value.detail["error"]["message"]
+
+
+def test_verify_bearer_missing(monkeypatch):
+    from examples.openai_server import verify_bearer, _OCESConfig
+    monkeypatch.setattr(_OCESConfig, "api_key", "secret")
+    with pytest.raises(HTTPException) as exc:
+        verify_bearer("")
+    assert exc.value.status_code == 401
+
+
+def test_verify_bearer_wrong_format(monkeypatch):
+    from examples.openai_server import verify_bearer, _OCESConfig
+    monkeypatch.setattr(_OCESConfig, "api_key", "secret")
+    with pytest.raises(HTTPException) as exc:
+        verify_bearer("secret")  # missing "Bearer " prefix
+    assert exc.value.status_code == 401
+
+
+def test_verify_bearer_wrong_value(monkeypatch):
+    from examples.openai_server import verify_bearer, _OCESConfig
+    monkeypatch.setattr(_OCESConfig, "api_key", "secret")
+    with pytest.raises(HTTPException) as exc:
+        verify_bearer("Bearer wrong")
+    assert exc.value.status_code == 401
+
+
+def test_verify_bearer_correct(monkeypatch):
+    from examples.openai_server import verify_bearer, _OCESConfig
+    monkeypatch.setattr(_OCESConfig, "api_key", "secret")
+    assert verify_bearer("Bearer secret") is None
+
+
+def test_verify_bearer_correct_with_whitespace(monkeypatch):
+    from examples.openai_server import verify_bearer, _OCESConfig
+    monkeypatch.setattr(_OCESConfig, "api_key", "secret")
+    assert verify_bearer("Bearer  secret  ") is None  # tolerant of trailing/leading ws on token

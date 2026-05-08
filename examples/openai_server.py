@@ -25,11 +25,13 @@ Tested with openai>=1.0, raw httpx, and curl.
 """
 from __future__ import annotations
 
+import hmac
+import os
 import re
 import secrets
 from typing import Any, Literal, Union
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 
@@ -218,6 +220,21 @@ def validate_request(req: "ChatCompletionRequest") -> HTTPException | None:
                                            "json_schema.schema is required when response_format.type=json_schema",
                                            param="response_format.json_schema.schema"))
     return None
+
+
+class _OCESConfig:
+    api_key: str = os.environ.get("API_KEY", "")
+    binary_path: str = os.environ.get("CLAUDE_BINARY", "~/.local/bin/claude")
+
+
+def verify_bearer(authorization: str = Header(default="")) -> None:
+    if not _OCESConfig.api_key:
+        raise HTTPException(500, _err("server_error", "API_KEY not configured"))
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, _err("invalid_request_error", "Missing bearer token"))
+    token = authorization[7:].strip()
+    if not hmac.compare_digest(token, _OCESConfig.api_key):
+        raise HTTPException(401, _err("invalid_request_error", "Invalid API key"))
 
 
 app = FastAPI(title="OCES", version="0.1.0")
