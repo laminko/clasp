@@ -25,6 +25,8 @@ Tested with openai>=1.0, raw httpx, and curl.
 """
 from __future__ import annotations
 
+import re
+import secrets
 from typing import Any, Literal, Union
 
 from fastapi import FastAPI
@@ -125,6 +127,38 @@ class ChatCompletionRequest(BaseModel):
     tools: list[Tool] | None = None
     tool_choice: ToolChoice | None = None
     parallel_tool_calls: bool = True
+
+
+CLAUDE_MODEL_RE = re.compile(r"^(?:claude-|sonnet$|opus$|haiku$)", re.IGNORECASE)
+
+
+def _err(err_type: str, message: str, *, code: str | None = None, param: str | None = None) -> dict:
+    return {"error": {"message": message, "type": err_type, "param": param, "code": code}}
+
+
+def make_request_id() -> str:
+    return "chatcmpl-" + secrets.token_hex(12)  # 24 hex chars
+
+
+def resolve_claude_model(model: str) -> str | None:
+    """Pass-through-when-claude. Returns the original string if it looks like a claude
+    model alias or full ID; otherwise None (caller omits --model and lets claude default)."""
+    if not model:
+        return None
+    return model if CLAUDE_MODEL_RE.match(model) else None
+
+
+def map_usage(raw: dict) -> dict:
+    """Translate cckit-format usage dict (Anthropic-style keys) to OpenAI-format."""
+    pt = raw.get("input_tokens", 0)
+    ct = raw.get("output_tokens", 0)
+    cached = raw.get("cache_read_input_tokens", 0)
+    return {
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "total_tokens": pt + ct,
+        "prompt_tokens_details": {"cached_tokens": cached},
+    }
 
 
 app = FastAPI(title="OCES", version="0.1.0")

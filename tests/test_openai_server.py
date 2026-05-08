@@ -89,3 +89,79 @@ def test_invalid_role_rejected():
     from examples.openai_server import ChatMessage
     with pytest.raises(ValidationError):
         ChatMessage.model_validate({"role": "robot", "content": "hi"})
+
+
+def test_err_envelope_shape():
+    from examples.openai_server import _err
+    body = _err("invalid_request_error", "bad input", code="bad_field", param="messages")
+    assert body == {
+        "error": {
+            "message": "bad input",
+            "type": "invalid_request_error",
+            "param": "messages",
+            "code": "bad_field",
+        }
+    }
+
+
+def test_err_envelope_defaults():
+    from examples.openai_server import _err
+    body = _err("server_error", "boom")
+    assert body["error"]["param"] is None
+    assert body["error"]["code"] is None
+
+
+def test_make_request_id_format():
+    from examples.openai_server import make_request_id
+    rid = make_request_id()
+    assert rid.startswith("chatcmpl-")
+    assert len(rid) == len("chatcmpl-") + 24
+
+
+def test_make_request_id_uniqueness():
+    from examples.openai_server import make_request_id
+    ids = {make_request_id() for _ in range(50)}
+    assert len(ids) == 50
+
+
+@pytest.mark.parametrize("model_in,expected", [
+    ("claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("Claude-Sonnet-4-6", "Claude-Sonnet-4-6"),
+    ("sonnet", "sonnet"),
+    ("OPUS", "OPUS"),
+    ("haiku", "haiku"),
+    ("gpt-4o-mini", None),
+    ("text-davinci-003", None),
+    ("", None),
+])
+def test_resolve_claude_model(model_in, expected):
+    from examples.openai_server import resolve_claude_model
+    assert resolve_claude_model(model_in) == expected
+
+
+def test_map_usage_full():
+    from examples.openai_server import map_usage
+    raw = {
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_input_tokens": 20,
+        "cache_creation_input_tokens": 5,
+    }
+    u = map_usage(raw)
+    assert u == {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": 20},
+    }
+
+
+def test_map_usage_empty():
+    from examples.openai_server import map_usage
+    u = map_usage({})
+    assert u == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
