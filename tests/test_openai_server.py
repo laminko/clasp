@@ -165,3 +165,60 @@ def test_map_usage_empty():
         "total_tokens": 0,
         "prompt_tokens_details": {"cached_tokens": 0},
     }
+
+
+def test_truncate_at_stop_first_match():
+    from examples.openai_server import truncate_at_stop
+    text, truncated = truncate_at_stop("hello\nstop\nworld", ["stop"])
+    assert text == "hello\n"
+    assert truncated is True
+
+
+def test_truncate_at_stop_multi_stop_picks_earliest():
+    from examples.openai_server import truncate_at_stop
+    text, truncated = truncate_at_stop("foo END bar STOP baz", ["STOP", "END"])
+    assert text == "foo "
+    assert truncated is True
+
+
+def test_truncate_at_stop_no_match():
+    from examples.openai_server import truncate_at_stop
+    text, truncated = truncate_at_stop("hello world", ["xyz"])
+    assert text == "hello world"
+    assert truncated is False
+
+
+def test_truncate_at_stop_str_param():
+    from examples.openai_server import truncate_at_stop
+    text, truncated = truncate_at_stop("a STOP b", "STOP")
+    assert text == "a "
+    assert truncated is True
+
+
+def test_truncate_at_stop_none():
+    from examples.openai_server import truncate_at_stop
+    text, truncated = truncate_at_stop("anything", None)
+    assert text == "anything"
+    assert truncated is False
+
+
+def test_truncate_max_tokens_under_budget():
+    from examples.openai_server import truncate_max_tokens
+    text, truncated = truncate_max_tokens("short text", max_tokens=100)
+    assert text == "short text"
+    assert truncated is False
+
+
+def test_truncate_max_tokens_over_budget():
+    from examples.openai_server import truncate_max_tokens
+    long = "x" * 100
+    text, truncated = truncate_max_tokens(long, max_tokens=10)  # ~40 chars
+    assert len(text) == 40
+    assert truncated is True
+
+
+def test_truncate_max_tokens_none_passes_through():
+    from examples.openai_server import truncate_max_tokens
+    text, truncated = truncate_max_tokens("anything", max_tokens=None)
+    assert text == "anything"
+    assert truncated is False

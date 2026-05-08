@@ -161,4 +161,32 @@ def map_usage(raw: dict) -> dict:
     }
 
 
+CHARS_PER_TOKEN = 4  # rough heuristic; no tokenizer dep
+
+
+def truncate_at_stop(text: str, stop: Union[str, list[str], None]) -> tuple[str, bool]:
+    """Find earliest occurrence of any stop string and truncate at it. Returns (text, truncated_flag)."""
+    if not stop:
+        return text, False
+    stops = [stop] if isinstance(stop, str) else list(stop)
+    earliest = -1
+    for s in stops:
+        idx = text.find(s)
+        if idx != -1 and (earliest == -1 or idx < earliest):
+            earliest = idx
+    if earliest == -1:
+        return text, False
+    return text[:earliest], True
+
+
+def truncate_max_tokens(text: str, max_tokens: int | None) -> tuple[str, bool]:
+    """Char-budget truncate (~4 chars/token). Returns (text, truncated_flag)."""
+    if max_tokens is None:
+        return text, False
+    budget = max_tokens * CHARS_PER_TOKEN
+    if len(text) <= budget:
+        return text, False
+    return text[:budget], True
+
+
 app = FastAPI(title="OCES", version="0.1.0")
