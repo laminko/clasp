@@ -38,6 +38,8 @@ from typing import Any, Literal, Union
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from cckit import CLI, CLIConfig, CustomAgent, ResultEvent, TextChunkEvent
+
 
 class TextContentPart(BaseModel):
     type: Literal["text"]
@@ -355,6 +357,44 @@ def build_prompt(req: "ChatCompletionRequest") -> tuple[str, str]:
 
     user_prompt = "\n".join(transcript_parts) + "\n[Assistant]: "
     return sys_prompt, user_prompt
+
+
+def _default_agent_factory(req: "ChatCompletionRequest") -> CustomAgent:
+    cli = CLI(config=CLIConfig(
+        binary_path=_OCESConfig.binary_path,
+        extra_flags=["--tools", "", "--include-partial-messages"],
+    ))
+    sys_prompt, _ = build_prompt(req)
+    return CustomAgent(
+        cli=cli,
+        system_prompt=sys_prompt,
+        bare=True,
+        model=resolve_claude_model(req.model),
+    )
+
+
+_agent_factory = _default_agent_factory
+
+
+def set_agent_factory(factory):
+    """Test seam: pass a callable (req) -> agent-with-stream_execute. Pass None to reset."""
+    global _agent_factory
+    _agent_factory = factory if factory is not None else _default_agent_factory
+
+
+async def drive_claude(req: "ChatCompletionRequest", final_usage) -> AsyncIterator[str]:
+    """Yield raw text chunks from claude; resolve final_usage on ResultEvent."""
+    _, user_prompt = build_prompt(req)
+    agent = _agent_factory(req)
+    async for event in agent.stream_execute(user_prompt):
+        if isinstance(event, TextChunkEvent):
+            if event.text:
+                yield event.text
+        elif isinstance(event, ResultEvent):
+            if not final_usage.done():
+                final_usage.set_result(map_usage(event.raw.get("usage", {})))
+    if not final_usage.done():
+        final_usage.set_result(map_usage({}))
 
 
 app = FastAPI(title="OCES", version="0.1.0")

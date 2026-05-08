@@ -564,3 +564,51 @@ async def test_parse_envelope_oversized_tool_buf_caps_with_error():
     assert error is not None
     assert error["code"] == "bridge_parse_error"
     assert "exceeded" in error["message"] or "64" in error["message"]
+
+
+class _FakeAgent:
+    """Fake CustomAgent for tests: yields the given chunks then a fake ResultEvent."""
+
+    def __init__(self, chunks, usage_raw=None):
+        self._chunks = chunks
+        self._usage = usage_raw or {"input_tokens": 10, "output_tokens": 20,
+                                    "cache_read_input_tokens": 0,
+                                    "cache_creation_input_tokens": 0}
+
+    async def stream_execute(self, prompt):
+        from cckit import TextChunkEvent, ResultEvent
+        for c in self._chunks:
+            yield TextChunkEvent(text=c)
+        yield ResultEvent(raw={"usage": self._usage}, result="", session_id="fake")
+
+
+def _make_factory(chunks, usage_raw=None):
+    def _factory(req):
+        return _FakeAgent(chunks, usage_raw)
+    return _factory
+
+
+@pytest.mark.asyncio
+async def test_drive_claude_yields_text_and_resolves_usage():
+    import asyncio
+    from examples.openai_server import drive_claude, set_agent_factory, _OCESConfig
+    set_agent_factory(_make_factory(["hello ", "world"]))
+    final_usage = asyncio.get_event_loop().create_future()
+    out = []
+    async for chunk in drive_claude(_req(), final_usage):
+        out.append(chunk)
+    assert out == ["hello ", "world"]
+    assert final_usage.done()
+    assert final_usage.result()["prompt_tokens"] == 10
+    set_agent_factory(None)  # reset
+
+
+@pytest.mark.asyncio
+async def test_drive_claude_default_factory_constructs_real_agent(monkeypatch):
+    """The default factory should construct a real cckit.CustomAgent — we just verify it doesn't crash to import."""
+    from examples.openai_server import _default_agent_factory
+    factory = _default_agent_factory
+    agent = factory(_req())
+    # Don't call stream_execute (would spawn claude). Just check the type.
+    from cckit import CustomAgent
+    assert isinstance(agent, CustomAgent)
