@@ -20,6 +20,9 @@ LIMITATIONS (documented in the design spec):
     - Mid-stream errors use `finish_reason="error"` (non-spec but standard practice).
     - response_format=json_schema is best-effort: instructions-only, no runtime validation.
       Clients should validate the response themselves.
+    - Tool argument values containing the literal string `<<</TOOL_CALLS>>>` will trigger
+      a parse error. This sentinel collision is rare; a JSON-aware parser would be needed
+      to fully resolve.
 
 Tested with openai>=1.0, raw httpx, and curl.
 """
@@ -363,6 +366,7 @@ CONT_OPEN = "<<<CONTENT>>>"
 CONT_CLOSE = "<<</CONTENT>>>"
 TAGS = (TOOL_OPEN, TOOL_CLOSE, CONT_OPEN, CONT_CLOSE)
 TAG_MAX = max(len(t) for t in TAGS)
+MAX_TOOL_BUF = 64 * 1024  # 64 KiB cap on accumulated tool_calls JSON before bailing
 
 
 def _strip_md_fence(s: str) -> str:
@@ -442,6 +446,11 @@ async def parse_envelope_stream(
                     if len(buf) > TAG_MAX:
                         tool_buf += buf[:-(TAG_MAX - 1)]
                         buf = buf[-(TAG_MAX - 1):]
+                        if len(tool_buf) > MAX_TOOL_BUF:
+                            yield {"kind": "error",
+                                   "code": "bridge_parse_error",
+                                   "message": f"tool_calls JSON exceeded {MAX_TOOL_BUF} bytes without closing tag"}
+                            return
                     break
             elif state == 2:
                 idx = buf.find(CONT_OPEN)
@@ -476,6 +485,12 @@ async def parse_envelope_stream(
     if state == 3 and buf:
         # CONTENT close never arrived — emit remaining buffer as content
         yield {"kind": "text_delta", "text": buf}
+
+    if state == 1:
+        yield {"kind": "error",
+               "code": "bridge_parse_error",
+               "message": "Stream ended inside <<<TOOL_CALLS>>> block before <<</TOOL_CALLS>>>"}
+        return
 
     if not saw_any_tag:
         yield {"kind": "error",

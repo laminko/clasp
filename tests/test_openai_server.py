@@ -539,3 +539,28 @@ async def test_parse_envelope_multiple_parallel_tool_calls():
     assert len(tc["calls"]) == 2
     assert tc["calls"][0]["name"] == "a"
     assert tc["calls"][1]["name"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_truncated_in_tool_section_emits_error():
+    """Stream ends inside <<<TOOL_CALLS>>> before <<</TOOL_CALLS>>> — must emit error."""
+    from examples.openai_server import parse_envelope_stream
+    chunks = ['<<<TOOL_CALLS>>>[{"name":"get_weather","arguments":{']
+    events = await _drain(parse_envelope_stream(_from_chunks(chunks), tools_present=True))
+    error = next((e for e in events if e["kind"] == "error"), None)
+    assert error is not None
+    assert error["code"] == "bridge_parse_error"
+    assert "TOOL_CALLS" in error["message"]
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_oversized_tool_buf_caps_with_error():
+    """Tool calls JSON section exceeding MAX_TOOL_BUF (64 KiB) must emit error, not OOM."""
+    from examples.openai_server import parse_envelope_stream
+    # 100 KiB of garbage inside tool section, no close tag
+    chunks = ["<<<TOOL_CALLS>>>", "x" * (100 * 1024)]
+    events = await _drain(parse_envelope_stream(_from_chunks(chunks), tools_present=True))
+    error = next((e for e in events if e["kind"] == "error"), None)
+    assert error is not None
+    assert error["code"] == "bridge_parse_error"
+    assert "exceeded" in error["message"] or "64" in error["message"]
