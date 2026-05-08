@@ -222,3 +222,70 @@ def test_truncate_max_tokens_none_passes_through():
     text, truncated = truncate_max_tokens("anything", max_tokens=None)
     assert text == "anything"
     assert truncated is False
+
+
+def _req(**overrides):
+    """Helper: build a minimal valid ChatCompletionRequest with overrides."""
+    from examples.openai_server import ChatCompletionRequest
+    base = {
+        "model": "sonnet",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    base.update(overrides)
+    return ChatCompletionRequest.model_validate(base)
+
+
+def test_validate_happy_path():
+    from examples.openai_server import validate_request
+    assert validate_request(_req()) is None
+
+
+def test_validate_empty_messages():
+    from examples.openai_server import validate_request, ChatCompletionRequest
+    req = ChatCompletionRequest.model_validate({"model": "x", "messages": []})
+    err = validate_request(req)
+    assert err is not None and err.status_code == 400
+    assert "messages" in err.detail["error"]["message"]
+
+
+def test_validate_n_greater_than_one():
+    from examples.openai_server import validate_request
+    err = validate_request(_req(n=2))
+    assert err is not None and err.status_code == 400
+    assert "n>1" in err.detail["error"]["message"]
+
+
+def test_validate_include_usage_without_stream():
+    from examples.openai_server import validate_request
+    err = validate_request(_req(stream=False, stream_options={"include_usage": True}))
+    assert err is not None and err.status_code == 400
+    assert "stream_options" in err.detail["error"]["message"]
+
+
+def test_validate_include_usage_with_stream_ok():
+    from examples.openai_server import validate_request
+    assert validate_request(_req(stream=True, stream_options={"include_usage": True})) is None
+
+
+def test_validate_tool_choice_unknown_function():
+    from examples.openai_server import validate_request
+    req = _req(
+        tools=[{"type": "function", "function": {"name": "a", "parameters": {}}}],
+        tool_choice={"type": "function", "function": {"name": "b"}},
+    )
+    err = validate_request(req)
+    assert err is not None and err.status_code == 400
+    assert "tool_choice" in err.detail["error"]["message"]
+
+
+def test_validate_tool_choice_required_without_tools():
+    from examples.openai_server import validate_request
+    err = validate_request(_req(tool_choice="required"))
+    assert err is not None and err.status_code == 400
+
+
+def test_validate_json_schema_missing_schema():
+    from examples.openai_server import validate_request
+    err = validate_request(_req(response_format={"type": "json_schema"}))
+    assert err is not None and err.status_code == 400
+    assert "json_schema" in err.detail["error"]["message"]

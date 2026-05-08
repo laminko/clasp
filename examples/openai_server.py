@@ -29,7 +29,7 @@ import re
 import secrets
 from typing import Any, Literal, Union
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 
@@ -187,6 +187,37 @@ def truncate_max_tokens(text: str, max_tokens: int | None) -> tuple[str, bool]:
     if len(text) <= budget:
         return text, False
     return text[:budget], True
+
+
+def validate_request(req: "ChatCompletionRequest") -> HTTPException | None:
+    if not req.messages:
+        return HTTPException(400, _err("invalid_request_error",
+                                       "messages must be a non-empty array",
+                                       param="messages"))
+    if req.n > 1:
+        return HTTPException(400, _err("invalid_request_error",
+                                       "n>1 not supported (claude CLI exposes no equivalent)",
+                                       param="n"))
+    if req.stream_options and req.stream_options.include_usage and not req.stream:
+        return HTTPException(400, _err("invalid_request_error",
+                                       "stream_options.include_usage requires stream=true",
+                                       param="stream_options.include_usage"))
+    if req.tool_choice == "required" and not req.tools:
+        return HTTPException(400, _err("invalid_request_error",
+                                       "tool_choice=required requires tools",
+                                       param="tool_choice"))
+    if isinstance(req.tool_choice, ToolChoiceObject):
+        names = {t.function.name for t in (req.tools or [])}
+        if req.tool_choice.function.name not in names:
+            return HTTPException(400, _err("invalid_request_error",
+                                           "tool_choice.function.name not in tools",
+                                           param="tool_choice.function.name"))
+    if req.response_format and req.response_format.type == "json_schema":
+        if not req.response_format.json_schema or "schema" not in req.response_format.json_schema:
+            return HTTPException(400, _err("invalid_request_error",
+                                           "json_schema.schema is required when response_format.type=json_schema",
+                                           param="response_format.json_schema.schema"))
+    return None
 
 
 app = FastAPI(title="OCES", version="0.1.0")
