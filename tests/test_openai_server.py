@@ -764,3 +764,98 @@ async def test_collect_openai_error_raises_http_exception():
         await collect_openai(parser, "chatcmpl-x", "sonnet", 1700000000, final_usage)
     assert exc.value.status_code == 502
     assert exc.value.detail["error"]["code"] == "bridge_envelope_missing"
+
+
+def _client(api_key="testkey"):
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig
+    _OCESConfig.api_key = api_key
+    return TestClient(app)
+
+
+def _auth(key="testkey"):
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+def test_endpoint_happy_non_streaming(monkeypatch):
+    from examples.openai_server import set_agent_factory
+    set_agent_factory(_make_factory(["hello ", "world"]))
+    try:
+        client = _client()
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["choices"][0]["message"]["content"] == "hello world"
+        assert body["choices"][0]["finish_reason"] == "stop"
+        assert body["usage"]["completion_tokens"] == 20
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_alias_route():
+    from examples.openai_server import set_agent_factory
+    set_agent_factory(_make_factory(["x"]))
+    try:
+        client = _client()
+        r = client.post("/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 200
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_streaming(monkeypatch):
+    from examples.openai_server import set_agent_factory
+    set_agent_factory(_make_factory(["hi ", "there"]))
+    try:
+        client = _client()
+        with client.stream("POST", "/v1/chat/completions", headers=_auth(),
+                           json={"model": "sonnet",
+                                 "messages": [{"role": "user", "content": "x"}],
+                                 "stream": True}) as r:
+            assert r.status_code == 200
+            assert "text/event-stream" in r.headers["content-type"]
+            body = b"".join(r.iter_bytes()).decode()
+            chunks = _parse_sse(body)
+            assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+            assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+            assert body.endswith("data: [DONE]\n\n")
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_missing_bearer():
+    client = _client()
+    r = client.post("/v1/chat/completions", headers={"Content-Type": "application/json"},
+                    json={"model": "sonnet",
+                          "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 401
+    assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_endpoint_wrong_bearer():
+    client = _client()
+    r = client.post("/v1/chat/completions", headers=_auth("wrong"),
+                    json={"model": "sonnet",
+                          "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 401
+
+
+def test_endpoint_validation_400():
+    client = _client()
+    r = client.post("/v1/chat/completions", headers=_auth(),
+                    json={"model": "sonnet", "messages": []})
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_endpoint_pydantic_validation_returns_openai_envelope():
+    client = _client()
+    r = client.post("/v1/chat/completions", headers=_auth(),
+                    json={"model": "sonnet"})  # missing messages
+    assert r.status_code in (400, 422)
+    assert "error" in r.json()
+    assert r.json()["error"]["type"] == "invalid_request_error"

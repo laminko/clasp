@@ -28,17 +28,32 @@ Tested with openai>=1.0, raw httpx, and curl.
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
+import logging
 import os
 import re
 import secrets
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Union
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from cckit import CLI, CLIConfig, CustomAgent, ResultEvent, TextChunkEvent
+from cckit.utils.errors import AuthError, CLIError, ParseError
+from cckit.utils.errors import TimeoutError as CckitTimeout
+
+logger = logging.getLogger("oces")
+
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
 
 
 class TextContentPart(BaseModel):
@@ -539,6 +554,64 @@ async def collect_openai(
 
 
 app = FastAPI(title="OCES", version="0.1.0")
+
+
+@app.exception_handler(RequestValidationError)
+async def _pydantic_handler(_request: Request, exc: RequestValidationError):
+    msg = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors())
+    return JSONResponse(_err("invalid_request_error", msg or "validation failed"), status_code=400)
+
+
+@app.exception_handler(HTTPException)
+async def _http_handler(_request: Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict) and "error" in detail:
+        return JSONResponse(detail, status_code=exc.status_code)
+    return JSONResponse(_err("server_error", str(detail)), status_code=exc.status_code)
+
+
+@app.exception_handler(Exception)
+async def _global_handler(_request: Request, exc: Exception):
+    if isinstance(exc, AuthError):
+        return JSONResponse(_err("server_error", str(exc), code="claude_auth_unavailable"), 503)
+    if isinstance(exc, CckitTimeout):
+        return JSONResponse(_err("server_error", str(exc), code="claude_timeout"), 504)
+    if isinstance(exc, ParseError):
+        return JSONResponse(_err("server_error", str(exc), code="claude_parse_error"), 502)
+    if isinstance(exc, CLIError):
+        return JSONResponse(_err("server_error", str(exc), code="claude_cli_failed"), 502)
+    logger.exception("Unhandled exception in OCES request")
+    return JSONResponse(_err("server_error", "Internal server error", code="unexpected"), 500)
+
+
+async def _handle_chat(req: ChatCompletionRequest):
+    err = validate_request(req)
+    if err:
+        raise err
+    final_usage = asyncio.get_event_loop().create_future()
+    chunks = drive_claude(req, final_usage)
+    parser = parse_envelope_stream(chunks, tools_present=bool(req.tools))
+    rid = make_request_id()
+    created = int(time.time())
+    if req.stream:
+        include_usage = bool(req.stream_options and req.stream_options.include_usage)
+        return StreamingResponse(
+            stream_openai(parser, rid, req.model, created, include_usage, final_usage),
+            media_type="text/event-stream",
+            headers=SSE_HEADERS,
+        )
+    body = await collect_openai(parser, rid, req.model, created, final_usage)
+    return JSONResponse(body)
+
+
+@app.post("/chat/completions")
+async def chat_completions_root(req: ChatCompletionRequest, _=Depends(verify_bearer)):
+    return await _handle_chat(req)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions_v1(req: ChatCompletionRequest, _=Depends(verify_bearer)):
+    return await _handle_chat(req)
 
 
 TOOL_OPEN = "<<<TOOL_CALLS>>>"
