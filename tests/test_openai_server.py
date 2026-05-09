@@ -859,3 +859,85 @@ def test_endpoint_pydantic_validation_returns_openai_envelope():
     assert r.status_code in (400, 422)
     assert "error" in r.json()
     assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+class _RaisingAgent:
+    def __init__(self, exc): self._exc = exc
+    async def stream_execute(self, prompt):
+        raise self._exc
+        yield  # unreachable, makes it an async gen
+
+
+def _raising_factory(exc):
+    def _f(req): return _RaisingAgent(exc)
+    return _f
+
+
+def test_endpoint_cckit_timeout_returns_504():
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig, set_agent_factory
+    from cckit.utils.errors import TimeoutError as CckitTimeout
+    set_agent_factory(_raising_factory(CckitTimeout("timed out after 30s")))
+    try:
+        _OCESConfig.api_key = "testkey"
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 504
+        assert r.json()["error"]["code"] == "claude_timeout"
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_cckit_auth_error_returns_503():
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig, set_agent_factory
+    from cckit.utils.errors import AuthError
+    set_agent_factory(_raising_factory(AuthError("not logged in")))
+    try:
+        _OCESConfig.api_key = "testkey"
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "claude_auth_unavailable"
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_cckit_cli_error_returns_502():
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig, set_agent_factory
+    from cckit.utils.errors import CLIError
+    set_agent_factory(_raising_factory(CLIError("exit 1", exit_code=1)))
+    try:
+        _OCESConfig.api_key = "testkey"
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 502
+        assert r.json()["error"]["code"] == "claude_cli_failed"
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_streaming_with_include_usage():
+    from examples.openai_server import set_agent_factory
+    set_agent_factory(_make_factory(["x"]))
+    try:
+        client = _client()
+        with client.stream("POST", "/v1/chat/completions", headers=_auth(),
+                           json={"model": "sonnet",
+                                 "messages": [{"role": "user", "content": "hi"}],
+                                 "stream": True,
+                                 "stream_options": {"include_usage": True}}) as r:
+            body = b"".join(r.iter_bytes()).decode()
+            chunks = _parse_sse(body)
+            usage_chunks = [c for c in chunks if c.get("usage")]
+            assert len(usage_chunks) == 1
+            assert usage_chunks[0]["usage"]["completion_tokens"] == 20
+    finally:
+        set_agent_factory(None)
