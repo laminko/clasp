@@ -303,17 +303,18 @@ def _envelope_instructions(req: "ChatCompletionRequest") -> str:
     )
 
     return f"""
-You will reply in EXACTLY this format. No prose before or after.
+You have access to function-calling tools. To CALL a tool, reply in EXACTLY this format:
 
 <<<TOOL_CALLS>>>
-<JSON array of tool calls, or [] if you are not calling any tool>
+[{{"id":"call_<short-hex>","name":"<tool_name>","arguments":<JSON object>}}, ...]
 <<</TOOL_CALLS>>>
 <<<CONTENT>>>
-<your natural-language reply, possibly empty if a tool was called>
+<optional explanatory text, may be empty>
 <<</CONTENT>>>
 
-Each tool call is: {{"id":"call_<short-hex>","name":"<tool_name>","arguments":<JSON object>}}
-Use double quotes everywhere. Do not wrap in markdown fences.
+Use double quotes everywhere; do not wrap in markdown fences.
+
+If you do NOT need to call any tool, reply normally with plain prose — no envelope needed.
 
 Available tools:
 {tools_str}
@@ -700,7 +701,14 @@ async def parse_envelope_stream(
       {"kind": "text_delta", "text": "..."}
       {"kind": "tool_calls", "calls": [{"id":..., "name":..., "arguments": {...}}]}
       {"kind": "finish", "reason": "stop" | "tool_calls" | "length"}
-      {"kind": "error", "code": "bridge_parse_error" | "bridge_envelope_missing", "message": "..."}
+      {"kind": "error", "code": "bridge_parse_error", "message": "..."}
+
+    When ``tools_present=True`` and the model responds with plain prose instead of
+    the sentinel envelope (claude often skips formatting instructions when no tool
+    call is needed), the parser gracefully falls back to passthrough mode: the text
+    is emitted as ``text_delta`` events with ``finish_reason="stop"`` (treated as
+    the model choosing not to invoke any tool). Errors are reserved for actual
+    protocol violations (truncated/malformed envelope contents).
     """
     if not tools_present:
         async for chunk in chunks:
@@ -709,6 +717,13 @@ async def parse_envelope_stream(
         yield {"kind": "finish", "reason": "stop"}
         return
 
+    # States:
+    #   0  — searching for TOOL_OPEN (with detection: may switch to state 5 if no envelope)
+    #   1  — buffering tool_calls JSON until TOOL_CLOSE
+    #   2  — searching for CONT_OPEN
+    #   3  — emitting content text deltas until CONT_CLOSE
+    #   4  — done, drain
+    #   5  — plain passthrough (model didn't follow envelope; treat as plain text)
     state = 0
     buf = ""
     tool_buf = ""
@@ -724,15 +739,37 @@ async def parse_envelope_stream(
             if state == 0:
                 idx = buf.find(TOOL_OPEN)
                 if idx != -1:
+                    # Envelope opener found — discard any preamble, advance.
                     buf = buf[idx + len(TOOL_OPEN):]
                     state = 1
                     saw_any_tag = True
                     progressed = True
-                else:
-                    # retain only the tail that could start a tag
+                    continue
+                # TOOL_OPEN not found. Decide: still possible (waiting), or definitely plain?
+                stripped = buf.lstrip()
+                if not stripped:
+                    # Only whitespace so far — keep waiting
                     if len(buf) > TAG_MAX:
                         buf = buf[-(TAG_MAX - 1):]
                     break
+                if len(stripped) < len(TOOL_OPEN) and TOOL_OPEN.startswith(stripped):
+                    # Buffer is a proper prefix of TOOL_OPEN — could still become the tag
+                    if len(buf) > TAG_MAX:
+                        buf = buf[-(TAG_MAX - 1):]
+                    break
+                # We have enough chars to know this is NOT envelope mode.
+                # Switch to plain passthrough; emit accumulated text.
+                if buf:
+                    yield {"kind": "text_delta", "text": buf}
+                    buf = ""
+                state = 5
+                progressed = True
+            elif state == 5:
+                # Plain passthrough — emit any pending buffer immediately
+                if buf:
+                    yield {"kind": "text_delta", "text": buf}
+                    buf = ""
+                break
             elif state == 1:
                 idx = buf.find(TOOL_CLOSE)
                 if idx != -1:
@@ -793,20 +830,26 @@ async def parse_envelope_stream(
                 break
 
     # End of stream cleanup
-    if state == 3 and buf:
-        # CONTENT close never arrived — emit remaining buffer as content
-        yield {"kind": "text_delta", "text": buf}
-
     if state == 1:
+        # Stream truncated inside TOOL_CALLS block — real protocol error
         yield {"kind": "error",
                "code": "bridge_parse_error",
                "message": "Stream ended inside <<<TOOL_CALLS>>> block before <<</TOOL_CALLS>>>"}
         return
 
+    if state == 3 and buf:
+        # CONTENT close never arrived — emit remaining buffer as content
+        yield {"kind": "text_delta", "text": buf}
+        buf = ""
+
+    if state in (0, 5) and buf:
+        # Plain mode (or state 0 that never decided) — flush remaining buffer as text
+        yield {"kind": "text_delta", "text": buf}
+        buf = ""
+
     if not saw_any_tag:
-        yield {"kind": "error",
-               "code": "bridge_envelope_missing",
-               "message": "Upstream model did not emit the required <<<TOOL_CALLS>>> envelope"}
+        # Model didn't follow envelope protocol. Treat as plain text reply (already emitted).
+        yield {"kind": "finish", "reason": "stop"}
         return
 
     # Emit tool_calls if any

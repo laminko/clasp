@@ -511,12 +511,27 @@ async def test_parse_envelope_malformed_json_emits_error():
 
 
 @pytest.mark.asyncio
-async def test_parse_envelope_missing_envelope_emits_error():
+async def test_parse_envelope_missing_falls_back_to_plain_text():
+    """When tools_present=True but model replies with prose (no envelope), treat as plain text."""
     from examples.openai_server import parse_envelope_stream
     chunks = ["just plain text without any tags"]
     events = await _drain(parse_envelope_stream(_from_chunks(chunks), tools_present=True))
-    error = next(e for e in events if e["kind"] == "error")
-    assert error["code"] == "bridge_envelope_missing"
+    assert not any(e["kind"] == "error" for e in events)
+    text = "".join(e["text"] for e in events if e["kind"] == "text_delta")
+    assert text == "just plain text without any tags"
+    assert events[-1] == {"kind": "finish", "reason": "stop"}
+
+
+@pytest.mark.asyncio
+async def test_parse_envelope_missing_streamed_falls_back():
+    """Same as above but text arrives across multiple chunks — still treated as plain."""
+    from examples.openai_server import parse_envelope_stream
+    chunks = ["The answer ", "is forty-", "two."]
+    events = await _drain(parse_envelope_stream(_from_chunks(chunks), tools_present=True))
+    assert not any(e["kind"] == "error" for e in events)
+    text = "".join(e["text"] for e in events if e["kind"] == "text_delta")
+    assert text == "The answer is forty-two."
+    assert events[-1] == {"kind": "finish", "reason": "stop"}
 
 
 @pytest.mark.asyncio
@@ -697,22 +712,46 @@ async def test_stream_openai_tool_calls_emit_two_chunks_per_call():
 
 @pytest.mark.asyncio
 async def test_stream_openai_error_event_terminates_with_error_chunk():
+    """Real protocol violations (malformed JSON inside envelope) emit terminating error chunk."""
     import asyncio
     from examples.openai_server import stream_openai, parse_envelope_stream
     final_usage = asyncio.get_event_loop().create_future()
     final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
                             "total_tokens": 0,
                             "prompt_tokens_details": {"cached_tokens": 0}})
-    parser = parse_envelope_stream(_from_chunks(["plain text no envelope"]), tools_present=True)
+    bad = "<<<TOOL_CALLS>>>[not valid json]<<</TOOL_CALLS>>><<<CONTENT>>>x<<</CONTENT>>>"
+    parser = parse_envelope_stream(_from_chunks([bad]), tools_present=True)
     sse = ""
     async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 1700000000, False, final_usage):
         sse += line
     chunks = _parse_sse(sse)
-    # Find the error chunk
     err_chunks = [c for c in chunks if c.get("error")]
     assert len(err_chunks) == 1
     assert err_chunks[0]["choices"][0]["finish_reason"] == "error"
-    assert err_chunks[0]["error"]["code"] == "bridge_envelope_missing"
+    assert err_chunks[0]["error"]["code"] == "bridge_parse_error"
+    assert sse.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_plain_response_when_tools_present():
+    """tools_present=True but model replies with prose: stream as plain text + stop."""
+    import asyncio
+    from examples.openai_server import stream_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["Hi! ", "How can I help?"]), tools_present=True)
+    sse = ""
+    async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 1700000000, False, final_usage):
+        sse += line
+    chunks = _parse_sse(sse)
+    assert not any(c.get("error") for c in chunks)
+    contents = [c["choices"][0]["delta"].get("content")
+                for c in chunks if "content" in c["choices"][0].get("delta", {})]
+    text = "".join(c for c in contents if c)
+    assert text == "Hi! How can I help?"
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
     assert sse.endswith("data: [DONE]\n\n")
 
 
@@ -754,16 +793,33 @@ async def test_collect_openai_tool_calls_omits_content():
 
 @pytest.mark.asyncio
 async def test_collect_openai_error_raises_http_exception():
+    """Real protocol violation (malformed envelope JSON) raises 502."""
     import asyncio
     from examples.openai_server import collect_openai, parse_envelope_stream
     final_usage = asyncio.get_event_loop().create_future()
     final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                             "prompt_tokens_details": {"cached_tokens": 0}})
-    parser = parse_envelope_stream(_from_chunks(["no envelope"]), tools_present=True)
+    bad = "<<<TOOL_CALLS>>>[not valid json]<<</TOOL_CALLS>>><<<CONTENT>>>x<<</CONTENT>>>"
+    parser = parse_envelope_stream(_from_chunks([bad]), tools_present=True)
     with pytest.raises(HTTPException) as exc:
         await collect_openai(parser, "chatcmpl-x", "sonnet", 1700000000, final_usage)
     assert exc.value.status_code == 502
-    assert exc.value.detail["error"]["code"] == "bridge_envelope_missing"
+    assert exc.value.detail["error"]["code"] == "bridge_parse_error"
+
+
+@pytest.mark.asyncio
+async def test_collect_openai_plain_response_when_tools_present():
+    """tools_present=True + plain prose reply: returned as content with finish=stop, no error."""
+    import asyncio
+    from examples.openai_server import collect_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["I don't need a tool. Hello!"]), tools_present=True)
+    body = await collect_openai(parser, "chatcmpl-x", "sonnet", 1700000000, final_usage)
+    assert body["choices"][0]["message"]["content"] == "I don't need a tool. Hello!"
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["choices"][0]["message"].get("tool_calls") is None
 
 
 def _client(api_key="testkey"):
