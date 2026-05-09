@@ -484,6 +484,60 @@ async def stream_openai(
     yield "data: [DONE]\n\n"
 
 
+SYSTEM_FINGERPRINT = "cckit-oces-0.1"
+
+
+async def collect_openai(
+    parser_events: AsyncIterator[dict],
+    req_id: str,
+    model: str,
+    created: int,
+    final_usage,
+) -> dict:
+    """Walk parser_events to completion and build a non-streaming ChatCompletionResponse."""
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    finish_reason = "stop"
+
+    async for ev in parser_events:
+        if ev["kind"] == "text_delta":
+            text_parts.append(ev["text"])
+        elif ev["kind"] == "tool_calls":
+            tool_calls = ev["calls"]
+        elif ev["kind"] == "finish":
+            finish_reason = ev["reason"]
+        elif ev["kind"] == "error":
+            raise HTTPException(502, _err("server_error", ev["message"], code=ev["code"]))
+
+    usage = await final_usage if not final_usage.done() else final_usage.result()
+    content_text = "".join(text_parts)
+
+    message: dict = {"role": "assistant"}
+    if tool_calls:
+        message["content"] = None
+        message["tool_calls"] = [
+            {"id": c["id"], "type": "function",
+             "function": {"name": c["name"], "arguments": _json.dumps(c["arguments"])}}
+            for c in tool_calls
+        ]
+    else:
+        message["content"] = content_text
+
+    return {
+        "id": req_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "system_fingerprint": SYSTEM_FINGERPRINT,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage,
+    }
+
+
 app = FastAPI(title="OCES", version="0.1.0")
 
 

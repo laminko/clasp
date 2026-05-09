@@ -714,3 +714,53 @@ async def test_stream_openai_error_event_terminates_with_error_chunk():
     assert err_chunks[0]["choices"][0]["finish_reason"] == "error"
     assert err_chunks[0]["error"]["code"] == "bridge_envelope_missing"
     assert sse.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.asyncio
+async def test_collect_openai_text():
+    import asyncio
+    from examples.openai_server import collect_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["hi ", "there"]), tools_present=False)
+    body = await collect_openai(parser, "chatcmpl-x", "sonnet", 1700000000, final_usage)
+    assert body["object"] == "chat.completion"
+    assert body["choices"][0]["message"]["role"] == "assistant"
+    assert body["choices"][0]["message"]["content"] == "hi there"
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["choices"][0]["message"].get("tool_calls") is None
+    assert body["usage"]["total_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_collect_openai_tool_calls_omits_content():
+    import asyncio
+    from examples.openai_server import collect_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    text = ('<<<TOOL_CALLS>>>[{"id":"c1","name":"f","arguments":{"x":1}}]<<</TOOL_CALLS>>>'
+            '<<<CONTENT>>><<</CONTENT>>>')
+    parser = parse_envelope_stream(_from_chunks([text]), tools_present=True)
+    body = await collect_openai(parser, "chatcmpl-x", "sonnet", 1700000000, final_usage)
+    msg = body["choices"][0]["message"]
+    assert msg["content"] is None
+    assert msg["tool_calls"][0]["id"] == "c1"
+    assert msg["tool_calls"][0]["function"]["name"] == "f"
+    assert msg["tool_calls"][0]["function"]["arguments"] == '{"x": 1}'
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_collect_openai_error_raises_http_exception():
+    import asyncio
+    from examples.openai_server import collect_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["no envelope"]), tools_present=True)
+    with pytest.raises(HTTPException) as exc:
+        await collect_openai(parser, "chatcmpl-x", "sonnet", 1700000000, final_usage)
+    assert exc.value.status_code == 502
+    assert exc.value.detail["error"]["code"] == "bridge_envelope_missing"
