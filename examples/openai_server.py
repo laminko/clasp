@@ -397,6 +397,93 @@ async def drive_claude(req: "ChatCompletionRequest", final_usage) -> AsyncIterat
         final_usage.set_result(map_usage({}))
 
 
+def _sse_chunk(payload: dict) -> str:
+    return "data: " + _json.dumps(payload, separators=(",", ":")) + "\n\n"
+
+
+def _base_chunk(req_id: str, model: str, created: int) -> dict:
+    return {
+        "id": req_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+    }
+
+
+async def stream_openai(
+    parser_events: AsyncIterator[dict],
+    req_id: str,
+    model: str,
+    created: int,
+    include_usage: bool,
+    final_usage,
+) -> AsyncIterator[str]:
+    """Yield SSE 'data: ...\\n\\n' lines, terminating with 'data: [DONE]\\n\\n'."""
+    # Opening role chunk
+    first = _base_chunk(req_id, model, created)
+    first["choices"][0]["delta"] = {"role": "assistant"}
+    yield _sse_chunk(first)
+
+    finish_reason: str | None = None
+    error: dict | None = None
+
+    async for ev in parser_events:
+        if ev["kind"] == "text_delta":
+            chunk = _base_chunk(req_id, model, created)
+            chunk["choices"][0]["delta"] = {"content": ev["text"]}
+            yield _sse_chunk(chunk)
+        elif ev["kind"] == "tool_calls":
+            for i, call in enumerate(ev["calls"]):
+                # Header chunk
+                header = _base_chunk(req_id, model, created)
+                header["choices"][0]["delta"] = {"tool_calls": [{
+                    "index": i,
+                    "id": call["id"],
+                    "type": "function",
+                    "function": {"name": call["name"], "arguments": ""},
+                }]}
+                yield _sse_chunk(header)
+                # Args chunk
+                args_chunk = _base_chunk(req_id, model, created)
+                args_chunk["choices"][0]["delta"] = {"tool_calls": [{
+                    "index": i,
+                    "function": {"arguments": _json.dumps(call["arguments"])},
+                }]}
+                yield _sse_chunk(args_chunk)
+        elif ev["kind"] == "finish":
+            finish_reason = ev["reason"]
+        elif ev["kind"] == "error":
+            error = ev
+            break
+
+    # Final delta chunk: either finish_reason or error
+    if error is not None:
+        err_chunk = _base_chunk(req_id, model, created)
+        err_chunk["choices"][0]["finish_reason"] = "error"
+        err_chunk["error"] = {"message": error["message"], "type": "server_error",
+                              "code": error["code"]}
+        yield _sse_chunk(err_chunk)
+    else:
+        final = _base_chunk(req_id, model, created)
+        final["choices"][0]["finish_reason"] = finish_reason or "stop"
+        yield _sse_chunk(final)
+
+        if include_usage:
+            usage = await final_usage if not final_usage.done() else final_usage.result()
+            usage_chunk = {
+                "id": req_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": usage,
+            }
+            yield _sse_chunk(usage_chunk)
+
+    yield "data: [DONE]\n\n"
+
+
 app = FastAPI(title="OCES", version="0.1.0")
 
 

@@ -612,3 +612,105 @@ async def test_drive_claude_default_factory_constructs_real_agent(monkeypatch):
     # Don't call stream_execute (would spawn claude). Just check the type.
     from cckit import CustomAgent
     assert isinstance(agent, CustomAgent)
+
+
+def _parse_sse(text: str) -> list[dict]:
+    """Parse an SSE response into list of decoded JSON chunks (excluding [DONE])."""
+    import json as _json
+    out = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        body = line[len("data:"):].strip()
+        if body == "[DONE]":
+            continue
+        out.append(_json.loads(body))
+    return out
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_text_only():
+    import asyncio
+    from examples.openai_server import stream_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 1, "completion_tokens": 2,
+                            "total_tokens": 3,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["hi ", "there"]), tools_present=False)
+    sse = ""
+    async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 1700000000, False, final_usage):
+        sse += line
+    chunks = _parse_sse(sse)
+    # First chunk: role assistant
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant"}
+    # Middle chunks: content deltas
+    contents = [c["choices"][0]["delta"].get("content")
+                for c in chunks[1:] if "content" in c["choices"][0]["delta"]]
+    assert "".join(c for c in contents if c) == "hi there"
+    # Final chunk: finish_reason stop
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    assert sse.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_with_usage():
+    import asyncio
+    from examples.openai_server import stream_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 5, "completion_tokens": 7,
+                            "total_tokens": 12,
+                            "prompt_tokens_details": {"cached_tokens": 1}})
+    parser = parse_envelope_stream(_from_chunks(["x"]), tools_present=False)
+    sse = ""
+    async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 1700000000, True, final_usage):
+        sse += line
+    chunks = _parse_sse(sse)
+    usage_chunks = [c for c in chunks if c.get("usage")]
+    assert len(usage_chunks) == 1
+    assert usage_chunks[0]["usage"]["prompt_tokens"] == 5
+    assert usage_chunks[0]["usage"]["total_tokens"] == 12
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_tool_calls_emit_two_chunks_per_call():
+    import asyncio
+    from examples.openai_server import stream_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    text = ('<<<TOOL_CALLS>>>[{"id":"call_1","name":"f","arguments":{"a":1}}]<<</TOOL_CALLS>>>'
+            '<<<CONTENT>>><<</CONTENT>>>')
+    parser = parse_envelope_stream(_from_chunks([text]), tools_present=True)
+    sse = ""
+    async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 1700000000, False, final_usage):
+        sse += line
+    chunks = _parse_sse(sse)
+    tc_deltas = [c for c in chunks if "tool_calls" in c["choices"][0].get("delta", {})]
+    assert len(tc_deltas) == 2  # header chunk + args chunk
+    assert tc_deltas[0]["choices"][0]["delta"]["tool_calls"][0]["id"] == "call_1"
+    assert tc_deltas[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "f"
+    assert tc_deltas[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == ""
+    assert tc_deltas[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_error_event_terminates_with_error_chunk():
+    import asyncio
+    from examples.openai_server import stream_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["plain text no envelope"]), tools_present=True)
+    sse = ""
+    async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 1700000000, False, final_usage):
+        sse += line
+    chunks = _parse_sse(sse)
+    # Find the error chunk
+    err_chunks = [c for c in chunks if c.get("error")]
+    assert len(err_chunks) == 1
+    assert err_chunks[0]["choices"][0]["finish_reason"] == "error"
+    assert err_chunks[0]["error"]["code"] == "bridge_envelope_missing"
+    assert sse.endswith("data: [DONE]\n\n")
