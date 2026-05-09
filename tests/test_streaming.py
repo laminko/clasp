@@ -142,7 +142,20 @@ class TestParseLine:
         assert "line1" in event.content
         assert "line2" in event.content
 
-    def test_assistant_fallback_on_unknown_content(self) -> None:
+    def test_assistant_with_no_text_or_tool_use_returns_none(self) -> None:
+        """Assistant events whose content has no text/tool_use blocks (e.g. thinking-only)
+        return None rather than stringifying the content as text. See parser.py."""
+        data = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "", "signature": "abc"}],
+            },
+        }
+        event = parse_line(json.dumps(data))
+        assert event is None
+
+    def test_assistant_unknown_content_block_returns_none(self) -> None:
         data = {
             "type": "assistant",
             "message": {
@@ -151,7 +164,23 @@ class TestParseLine:
             },
         }
         event = parse_line(json.dumps(data))
+        assert event is None
+
+    def test_assistant_thinking_then_text_returns_text_block(self) -> None:
+        """When a content array has thinking + text, parser returns the text block."""
+        data = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "...", "signature": "x"},
+                    {"type": "text", "text": "Hello"},
+                ],
+            },
+        }
+        event = parse_line(json.dumps(data))
         assert isinstance(event, TextChunkEvent)
+        assert event.text == "Hello"
 
     def test_unknown_event_returns_base(self) -> None:
         data = {"type": "totally_unknown"}

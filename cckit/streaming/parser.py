@@ -106,7 +106,7 @@ def parse_line(line: str) -> Event | None:
     return BaseEvent(raw=data)  # type: ignore[return-value]
 
 
-def _parse_assistant_event(data: dict[str, Any]) -> Event:
+def _parse_assistant_event(data: dict[str, Any]) -> Event | None:
     message = data.get("message", {})
     content = message.get("content", [])
 
@@ -124,5 +124,9 @@ def _parse_assistant_event(data: dict[str, Any]) -> Event:
                 tool_use_id=block.get("id", ""),
             )
 
-    # Fallback: treat entire message as text
-    return TextChunkEvent(raw=data, text=str(content))
+    # No text or tool_use block — most commonly an extended-thinking-only
+    # assistant turn. Skip rather than emit a stringified Python repr as text.
+    logger.debug("Skipping assistant event with no text/tool_use content: %s",
+                 [b.get("type") if isinstance(b, dict) else type(b).__name__
+                  for b in content])
+    return None

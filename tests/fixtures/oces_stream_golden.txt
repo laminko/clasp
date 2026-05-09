@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-FIXED","object":"chat.completion.chunk","created":1700000000,"model":"sonnet","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-FIXED","object":"chat.completion.chunk","created":1700000000,"model":"sonnet","choices":[{"index":0,"delta":{"content":"hello "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-FIXED","object":"chat.completion.chunk","created":1700000000,"model":"sonnet","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-FIXED","object":"chat.completion.chunk","created":1700000000,"model":"sonnet","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
