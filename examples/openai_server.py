@@ -433,6 +433,9 @@ async def stream_openai(
     created: int,
     include_usage: bool,
     final_usage,
+    *,
+    stop: Union[str, list[str], None] = None,
+    max_tokens: int | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE 'data: ...\\n\\n' lines, terminating with 'data: [DONE]\\n\\n'."""
     # Opening role chunk
@@ -442,42 +445,83 @@ async def stream_openai(
 
     finish_reason: str | None = None
     error: dict | None = None
+    char_budget = max_tokens * CHARS_PER_TOKEN if max_tokens is not None else None
+    emitted_chars = 0
+    capped = False
 
-    async for ev in parser_events:
-        if ev["kind"] == "text_delta":
-            chunk = _base_chunk(req_id, model, created)
-            chunk["choices"][0]["delta"] = {"content": ev["text"]}
-            yield _sse_chunk(chunk)
-        elif ev["kind"] == "tool_calls":
-            for i, call in enumerate(ev["calls"]):
-                # Header chunk
-                header = _base_chunk(req_id, model, created)
-                header["choices"][0]["delta"] = {"tool_calls": [{
-                    "index": i,
-                    "id": call["id"],
-                    "type": "function",
-                    "function": {"name": call["name"], "arguments": ""},
-                }]}
-                yield _sse_chunk(header)
-                # Args chunk
-                args_chunk = _base_chunk(req_id, model, created)
-                args_chunk["choices"][0]["delta"] = {"tool_calls": [{
-                    "index": i,
-                    "function": {"arguments": _json.dumps(call["arguments"])},
-                }]}
-                yield _sse_chunk(args_chunk)
-        elif ev["kind"] == "finish":
-            finish_reason = ev["reason"]
-        elif ev["kind"] == "error":
-            error = ev
-            break
+    try:
+        async for ev in parser_events:
+            if capped:
+                # Drain remaining events without emitting content; still handle tool_calls/finish
+                if ev["kind"] == "finish":
+                    pass  # finish_reason already set when capped
+                elif ev["kind"] == "error":
+                    error = ev
+                    break
+                continue
+            if ev["kind"] == "text_delta":
+                text = ev["text"]
+                # Apply stop-string check on accumulated text
+                if stop:
+                    stops = [stop] if isinstance(stop, str) else list(stop)
+                    for s in stops:
+                        idx = text.find(s)
+                        if idx != -1:
+                            text = text[:idx]
+                            finish_reason = "stop"
+                            capped = True
+                            break
+                # Apply char-budget check
+                if char_budget is not None and not capped:
+                    remaining = char_budget - emitted_chars
+                    if len(text) > remaining:
+                        text = text[:remaining]
+                        finish_reason = "length"
+                        capped = True
+                if text:
+                    emitted_chars += len(text)
+                    chunk = _base_chunk(req_id, model, created)
+                    chunk["choices"][0]["delta"] = {"content": text}
+                    yield _sse_chunk(chunk)
+            elif ev["kind"] == "tool_calls":
+                for i, call in enumerate(ev["calls"]):
+                    # Header chunk
+                    header = _base_chunk(req_id, model, created)
+                    header["choices"][0]["delta"] = {"tool_calls": [{
+                        "index": i,
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {"name": call["name"], "arguments": ""},
+                    }]}
+                    yield _sse_chunk(header)
+                    # Args chunk
+                    args_chunk = _base_chunk(req_id, model, created)
+                    args_chunk["choices"][0]["delta"] = {"tool_calls": [{
+                        "index": i,
+                        "function": {"arguments": _json.dumps(call["arguments"])},
+                    }]}
+                    yield _sse_chunk(args_chunk)
+            elif ev["kind"] == "finish":
+                finish_reason = ev["reason"]
+            elif ev["kind"] == "error":
+                error = ev
+                break
+    except CckitTimeout as exc:
+        error = {"code": "claude_timeout", "message": str(exc)}
+    except AuthError as exc:
+        error = {"code": "claude_auth_unavailable", "message": str(exc)}
+    except ParseError as exc:
+        error = {"code": "claude_parse_error", "message": str(exc)}
+    except CLIError as exc:
+        error = {"code": "claude_cli_failed", "message": str(exc)}
+    except Exception as exc:
+        error = {"code": "unexpected", "message": str(exc)}
 
     # Final delta chunk: either finish_reason or error
     if error is not None:
         err_chunk = _base_chunk(req_id, model, created)
         err_chunk["choices"][0]["finish_reason"] = "error"
-        err_chunk["error"] = {"message": error["message"], "type": "server_error",
-                              "code": error["code"]}
+        err_chunk["error"] = _err("server_error", error["message"], code=error["code"])["error"]
         yield _sse_chunk(err_chunk)
     else:
         final = _base_chunk(req_id, model, created)
@@ -508,6 +552,9 @@ async def collect_openai(
     model: str,
     created: int,
     final_usage,
+    *,
+    stop: Union[str, list[str], None] = None,
+    max_tokens: int | None = None,
 ) -> dict:
     """Walk parser_events to completion and build a non-streaming ChatCompletionResponse."""
     text_parts: list[str] = []
@@ -526,6 +573,13 @@ async def collect_openai(
 
     usage = await final_usage if not final_usage.done() else final_usage.result()
     content_text = "".join(text_parts)
+
+    content_text, stopped = truncate_at_stop(content_text, stop)
+    if stopped:
+        finish_reason = "stop"
+    content_text, length_truncated = truncate_max_tokens(content_text, max_tokens)
+    if length_truncated:
+        finish_reason = "length"
 
     message: dict = {"role": "assistant"}
     if tool_calls:
@@ -588,19 +642,22 @@ async def _handle_chat(req: ChatCompletionRequest):
     err = validate_request(req)
     if err:
         raise err
-    final_usage = asyncio.get_event_loop().create_future()
+    final_usage = asyncio.get_running_loop().create_future()
     chunks = drive_claude(req, final_usage)
     parser = parse_envelope_stream(chunks, tools_present=bool(req.tools))
     rid = make_request_id()
     created = int(time.time())
+    mt = req.max_tokens if req.max_tokens is not None else req.max_completion_tokens
     if req.stream:
         include_usage = bool(req.stream_options and req.stream_options.include_usage)
         return StreamingResponse(
-            stream_openai(parser, rid, req.model, created, include_usage, final_usage),
+            stream_openai(parser, rid, req.model, created, include_usage, final_usage,
+                          stop=req.stop, max_tokens=mt),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )
-    body = await collect_openai(parser, rid, req.model, created, final_usage)
+    body = await collect_openai(parser, rid, req.model, created, final_usage,
+                                stop=req.stop, max_tokens=mt)
     return JSONResponse(body)
 
 

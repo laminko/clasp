@@ -1034,6 +1034,120 @@ async def test_harness_openai_sdk_tool_calls():
         set_agent_factory(None)
 
 
+@pytest.mark.asyncio
+async def test_collect_openai_applies_max_tokens():
+    import asyncio
+    from examples.openai_server import collect_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["x" * 100]), tools_present=False)
+    body = await collect_openai(parser, "chatcmpl-x", "sonnet", 0, final_usage,
+                                 stop=None, max_tokens=10)
+    # 10 tokens * 4 chars/token = 40 chars
+    assert len(body["choices"][0]["message"]["content"]) == 40
+    assert body["choices"][0]["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_collect_openai_applies_stop():
+    import asyncio
+    from examples.openai_server import collect_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["hello STOP world"]), tools_present=False)
+    body = await collect_openai(parser, "chatcmpl-x", "sonnet", 0, final_usage,
+                                 stop=["STOP"], max_tokens=None)
+    assert body["choices"][0]["message"]["content"] == "hello "
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_endpoint_max_tokens_truncates_response():
+    """End-to-end: max_tokens enforcement in non-streaming mode."""
+    from examples.openai_server import set_agent_factory
+    set_agent_factory(_make_factory(["x" * 200]))  # 200 chars
+    try:
+        client = _client()
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}],
+                              "max_tokens": 5})  # 5 * 4 = 20 chars
+        body = r.json()
+        assert len(body["choices"][0]["message"]["content"]) == 20
+        assert body["choices"][0]["finish_reason"] == "length"
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_stop_truncates_response():
+    """End-to-end: stop string enforcement."""
+    from examples.openai_server import set_agent_factory
+    set_agent_factory(_make_factory(["before HALT after"]))
+    try:
+        client = _client()
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}],
+                              "stop": "HALT"})
+        body = r.json()
+        assert body["choices"][0]["message"]["content"] == "before "
+        assert body["choices"][0]["finish_reason"] == "stop"
+    finally:
+        set_agent_factory(None)
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_applies_max_tokens():
+    """Streaming path: max_tokens enforcement."""
+    import asyncio
+    from examples.openai_server import stream_openai, parse_envelope_stream
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    parser = parse_envelope_stream(_from_chunks(["a" * 50, "b" * 50]), tools_present=False)
+    sse = ""
+    async for line in stream_openai(parser, "chatcmpl-x", "sonnet", 0, False, final_usage,
+                                     stop=None, max_tokens=10):  # 40 char budget
+        sse += line
+    chunks = _parse_sse(sse)
+    contents = [c["choices"][0]["delta"].get("content", "")
+                for c in chunks if "content" in c["choices"][0].get("delta", {})]
+    total = "".join(c for c in contents if c)
+    assert len(total) == 40
+    assert chunks[-1]["choices"][0]["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_catches_mid_stream_cckit_error():
+    """If cckit raises after streaming starts, error chunk + [DONE] are emitted (not silent abort)."""
+    import asyncio
+    from examples.openai_server import stream_openai
+    from cckit.utils.errors import TimeoutError as CckitTimeout
+
+    async def _bad_parser():
+        yield {"kind": "text_delta", "text": "partial response..."}
+        raise CckitTimeout("simulated timeout mid-stream")
+
+    final_usage = asyncio.get_event_loop().create_future()
+    final_usage.set_result({"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "prompt_tokens_details": {"cached_tokens": 0}})
+    sse = ""
+    async for line in stream_openai(_bad_parser(), "chatcmpl-x", "sonnet", 0, False, final_usage,
+                                     stop=None, max_tokens=None):
+        sse += line
+    chunks = _parse_sse(sse)
+    err_chunks = [c for c in chunks if c.get("error")]
+    assert len(err_chunks) == 1
+    assert err_chunks[0]["error"]["code"] == "claude_timeout"
+    assert err_chunks[0]["choices"][0]["finish_reason"] == "error"
+    assert sse.endswith("data: [DONE]\n\n")
+
+
 def test_harness_golden_sse_snapshot():
     """Byte-for-byte SSE snapshot — fails on any drift."""
     import re
