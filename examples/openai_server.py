@@ -4,9 +4,15 @@ A FastAPI app that exposes a `POST /chat/completions` endpoint compatible with
 the OpenAI API, backed by cckit driving the real `claude` CLI binary.
 
 USAGE:
-    export API_KEY=sk-test-1234567890
+    export API_KEY=sk-test-1234567890          # OCES bearer token (your choice)
     export CLAUDE_BINARY=~/.local/bin/claude   # optional
     uv run python examples/openai_server.py    # listens on http://0.0.0.0:8000
+
+AUTHENTICATION:
+    OCES uses cckit to drive the real `claude` CLI. Anthropic auth comes from
+    claude itself — whichever method `claude auth login` configured (Claude.ai
+    subscription via OAuth/keychain, or ANTHROPIC_API_KEY env var). The OCES
+    `API_KEY` env var validates OCES clients only and is independent.
 
 VERIFY:
     curl -N http://localhost:8000/v1/chat/completions \\
@@ -381,10 +387,15 @@ def _default_agent_factory(req: "ChatCompletionRequest") -> CustomAgent:
         extra_flags=["--tools", "", "--include-partial-messages"],
     ))
     sys_prompt, _ = build_prompt(req)
+    # bare=False so claude reads OAuth/keychain credentials (works with Claude.ai
+    # subscriptions). bare=True would force ANTHROPIC_API_KEY only, which most
+    # users don't have set when running OCES locally. Hooks/plugins/CLAUDE.md
+    # loaded under bare=False are harmless because we override the full system
+    # prompt via --system-prompt anyway.
     return CustomAgent(
         cli=cli,
         system_prompt=sys_prompt,
-        bare=True,
+        bare=False,
         model=resolve_claude_model(req.model),
     )
 
@@ -398,19 +409,71 @@ def set_agent_factory(factory):
     _agent_factory = factory if factory is not None else _default_agent_factory
 
 
+# Patterns claude prints when its own auth/state is broken. We detect these in the
+# raw text stream because cckit doesn't classify them as errors — claude often emits
+# them as ordinary assistant text before exiting. Keep the list narrow to avoid
+# flagging legitimate model output.
+_CLAUDE_AUTH_ERROR_PATTERNS = (
+    "not logged in",
+    "please run /login",
+    "claude.ai/login",
+    "authentication failed",
+)
+# Bytes of stream we hold back before yielding, so an auth message arriving as
+# the first text event becomes an exception rather than a 200-OK content body.
+_DRIVE_DETECT_BUFFER = 80
+
+
+def _looks_like_claude_auth_error(text: str) -> bool:
+    lower = text.lower()
+    return any(p in lower for p in _CLAUDE_AUTH_ERROR_PATTERNS)
+
+
 async def drive_claude(req: "ChatCompletionRequest", final_usage) -> AsyncIterator[str]:
-    """Yield raw text chunks from claude; resolve final_usage on ResultEvent."""
+    """Yield raw text chunks from claude; resolve final_usage on ResultEvent.
+
+    Detects claude-side errors (auth, unexpected non-zero result) BEFORE streaming
+    the message back as if it were model output. Raises cckit.AuthError or
+    cckit.CLIError, which the global exception handler maps to 503 / 502.
+    """
     _, user_prompt = build_prompt(req)
     agent = _agent_factory(req)
-    async for event in agent.stream_execute(user_prompt):
-        if isinstance(event, TextChunkEvent):
-            if event.text:
+
+    detect_buf = ""
+    detection_done = False
+    try:
+        async for event in agent.stream_execute(user_prompt):
+            if isinstance(event, TextChunkEvent):
+                if not event.text:
+                    continue
+                # Accumulate a small detection window in parallel with yielding.
+                # Yields are immediate to preserve streaming UX; if an auth pattern
+                # appears in the accumulated window, we raise (the client may have
+                # already received a partial chunk, but the streaming layer's
+                # try/except converts that into a terminating error chunk).
+                if not detection_done:
+                    detect_buf += event.text
+                    if _looks_like_claude_auth_error(detect_buf):
+                        raise AuthError(
+                            f"claude binary not authenticated: {detect_buf.strip()}"
+                        )
+                    if len(detect_buf) >= _DRIVE_DETECT_BUFFER:
+                        detection_done = True
+                        detect_buf = ""  # release memory
                 yield event.text
-        elif isinstance(event, ResultEvent):
-            if not final_usage.done():
-                final_usage.set_result(map_usage(event.raw.get("usage", {})))
-    if not final_usage.done():
-        final_usage.set_result(map_usage({}))
+            elif isinstance(event, ResultEvent):
+                if event.is_error:
+                    err_text = event.raw.get("result", "") or detect_buf
+                    if _looks_like_claude_auth_error(err_text):
+                        raise AuthError(
+                            f"claude binary not authenticated: {err_text.strip()}"
+                        )
+                    raise CLIError(f"claude returned error: {err_text.strip()}")
+                if not final_usage.done():
+                    final_usage.set_result(map_usage(event.raw.get("usage", {})))
+    finally:
+        if not final_usage.done():
+            final_usage.set_result(map_usage({}))
 
 
 def _sse_chunk(payload: dict) -> str:

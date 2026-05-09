@@ -619,6 +619,91 @@ async def test_drive_claude_yields_text_and_resolves_usage():
 
 
 @pytest.mark.asyncio
+async def test_drive_claude_raises_authentication_error_on_text_pattern():
+    """When claude emits 'Not logged in...' as text, drive_claude raises AuthError early."""
+    import asyncio
+    from cckit.utils.errors import AuthError
+    from examples.openai_server import drive_claude, set_agent_factory
+    set_agent_factory(_make_factory(["Not logged in · Please run /login"]))
+    final_usage = asyncio.get_event_loop().create_future()
+    try:
+        with pytest.raises(AuthError):
+            async for _chunk in drive_claude(_req(), final_usage):
+                pass
+    finally:
+        set_agent_factory(None)
+
+
+@pytest.mark.asyncio
+async def test_drive_claude_raises_authentication_error_on_result_is_error():
+    """When ResultEvent.is_error=True with auth message, drive_claude raises AuthError."""
+    import asyncio
+    from cckit import ResultEvent, TextChunkEvent
+    from cckit.utils.errors import AuthError
+    from examples.openai_server import drive_claude, set_agent_factory
+
+    class _ErrorResultAgent:
+        async def stream_execute(self, prompt):
+            yield ResultEvent(raw={"result": "Authentication failed",
+                                    "is_error": True, "usage": {}},
+                               result="Authentication failed", session_id="x",
+                               is_error=True)
+
+    set_agent_factory(lambda req: _ErrorResultAgent())
+    final_usage = asyncio.get_event_loop().create_future()
+    try:
+        with pytest.raises(AuthError):
+            async for _chunk in drive_claude(_req(), final_usage):
+                pass
+    finally:
+        set_agent_factory(None)
+
+
+@pytest.mark.asyncio
+async def test_drive_claude_raises_cli_error_on_non_auth_result_is_error():
+    """ResultEvent.is_error=True without auth markers raises CLIError (mapped to 502)."""
+    import asyncio
+    from cckit import ResultEvent
+    from cckit.utils.errors import CLIError
+    from examples.openai_server import drive_claude, set_agent_factory
+
+    class _ErrorResultAgent:
+        async def stream_execute(self, prompt):
+            yield ResultEvent(raw={"result": "Rate limit exceeded",
+                                    "is_error": True, "usage": {}},
+                               result="Rate limit exceeded", session_id="x",
+                               is_error=True)
+
+    set_agent_factory(lambda req: _ErrorResultAgent())
+    final_usage = asyncio.get_event_loop().create_future()
+    try:
+        with pytest.raises(CLIError):
+            async for _chunk in drive_claude(_req(), final_usage):
+                pass
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_claude_not_authenticated_returns_503():
+    """End-to-end: when claude binary is unauthenticated, OCES returns 503 (not 200)."""
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig, set_agent_factory
+    _OCESConfig.api_key = "testkey"
+    set_agent_factory(_make_factory(["Not logged in · Please run /login"]))
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 503
+        body = r.json()
+        assert body["error"]["code"] == "claude_auth_unavailable"
+        assert "logged in" in body["error"]["message"].lower()
+    finally:
+        set_agent_factory(None)
+
+
+@pytest.mark.asyncio
 async def test_drive_claude_default_factory_constructs_real_agent(monkeypatch):
     """The default factory should construct a real cckit.CustomAgent — we just verify it doesn't crash to import."""
     from examples.openai_server import _default_agent_factory
