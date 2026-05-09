@@ -771,3 +771,22 @@ async def parse_envelope_stream(
         finish_reason = "tool_calls"
 
     yield {"kind": "finish", "reason": finish_reason}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8000"))
+
+    if not _OCESConfig.api_key:
+        print("ERROR: API_KEY env var not set. Refusing to start.", flush=True)
+        raise SystemExit(2)
+
+    logging.basicConfig(
+        level=os.environ.get("LOGLEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logger.info("OCES starting on http://%s:%d (claude binary: %s)",
+                host, port, _OCESConfig.binary_path)
+    uvicorn.run(app, host=host, port=port, log_level=os.environ.get("LOGLEVEL", "info").lower())
