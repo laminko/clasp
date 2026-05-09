@@ -941,3 +941,122 @@ def test_endpoint_streaming_with_include_usage():
             assert usage_chunks[0]["usage"]["completion_tokens"] == 20
     finally:
         set_agent_factory(None)
+
+
+import json as _json
+
+
+@pytest.mark.asyncio
+async def test_harness_openai_sdk_non_streaming():
+    """Verify the official openai>=1.0 SDK can call our endpoint without errors."""
+    import httpx
+    from openai import AsyncOpenAI
+    from examples.openai_server import app, set_agent_factory, _OCESConfig
+    _OCESConfig.api_key = "testkey"
+    set_agent_factory(_make_factory(["the answer is 42"]))
+    try:
+        client = AsyncOpenAI(
+            base_url="http://testserver/v1",
+            api_key="testkey",
+            http_client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                          base_url="http://testserver"),
+        )
+        resp = await client.chat.completions.create(
+            model="sonnet",
+            messages=[{"role": "user", "content": "what is the answer?"}],
+        )
+        assert resp.choices[0].message.content == "the answer is 42"
+        assert resp.choices[0].finish_reason == "stop"
+    finally:
+        await client.close()
+        set_agent_factory(None)
+
+
+@pytest.mark.asyncio
+async def test_harness_openai_sdk_streaming():
+    import httpx
+    from openai import AsyncOpenAI
+    from examples.openai_server import app, set_agent_factory, _OCESConfig
+    _OCESConfig.api_key = "testkey"
+    set_agent_factory(_make_factory(["foo ", "bar ", "baz"]))
+    try:
+        client = AsyncOpenAI(
+            base_url="http://testserver/v1",
+            api_key="testkey",
+            http_client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                          base_url="http://testserver"),
+        )
+        stream = await client.chat.completions.create(
+            model="sonnet",
+            messages=[{"role": "user", "content": "x"}],
+            stream=True,
+        )
+        chunks = []
+        async for c in stream:
+            chunks.append(c)
+        text = "".join((c.choices[0].delta.content or "") for c in chunks if c.choices)
+        assert text == "foo bar baz"
+        assert any(c.choices and c.choices[0].finish_reason == "stop" for c in chunks)
+    finally:
+        await client.close()
+        set_agent_factory(None)
+
+
+@pytest.mark.asyncio
+async def test_harness_openai_sdk_tool_calls():
+    import httpx
+    from openai import AsyncOpenAI
+    from examples.openai_server import app, set_agent_factory, _OCESConfig
+    _OCESConfig.api_key = "testkey"
+    text = ('<<<TOOL_CALLS>>>[{"id":"call_1","name":"get_weather",'
+            '"arguments":{"city":"Paris"}}]<<</TOOL_CALLS>>>'
+            '<<<CONTENT>>><<</CONTENT>>>')
+    set_agent_factory(_make_factory([text]))
+    try:
+        client = AsyncOpenAI(
+            base_url="http://testserver/v1",
+            api_key="testkey",
+            http_client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                          base_url="http://testserver"),
+        )
+        resp = await client.chat.completions.create(
+            model="sonnet",
+            messages=[{"role": "user", "content": "weather?"}],
+            tools=[{"type": "function",
+                    "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+        )
+        assert resp.choices[0].finish_reason == "tool_calls"
+        tc = resp.choices[0].message.tool_calls[0]
+        assert tc.function.name == "get_weather"
+        assert _json.loads(tc.function.arguments) == {"city": "Paris"}
+    finally:
+        await client.close()
+        set_agent_factory(None)
+
+
+def test_harness_golden_sse_snapshot():
+    """Byte-for-byte SSE snapshot — fails on any drift."""
+    import re
+    from pathlib import Path
+    from examples.openai_server import set_agent_factory, _OCESConfig
+    _OCESConfig.api_key = "testkey"
+    set_agent_factory(_make_factory(["hello ", "world"],
+                                     usage_raw={"input_tokens": 1, "output_tokens": 2,
+                                                "cache_read_input_tokens": 0,
+                                                "cache_creation_input_tokens": 0}))
+    try:
+        client = _client()
+        with client.stream("POST", "/v1/chat/completions", headers=_auth(),
+                           json={"model": "sonnet",
+                                 "messages": [{"role": "user", "content": "hi"}],
+                                 "stream": True}) as r:
+            body = b"".join(r.iter_bytes()).decode()
+        masked = re.sub(r'"id":"chatcmpl-[0-9a-f]{24}"', '"id":"chatcmpl-FIXED"', body)
+        masked = re.sub(r'"created":\d+', '"created":1700000000', masked)
+        golden = Path("tests/fixtures/oces_stream_golden.txt").read_text()
+        assert masked == golden, (
+            "SSE output drift detected. To accept new output as canonical, regenerate "
+            "tests/fixtures/oces_stream_golden.txt with the snippet in plan Task 16 step 3."
+        )
+    finally:
+        set_agent_factory(None)
