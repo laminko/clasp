@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 from ..streaming.events import Event
 from ..streaming.handler import StreamHandler
-from ..types.enums import OutputFormat, PermissionMode
+from ..types.enums import InputFormat, OutputFormat, PermissionMode
 from ..types.responses import Response
 from ..utils.errors import CLIError
 from ..utils.helpers import expand_path, get_logger
@@ -51,14 +51,44 @@ class CLI:
 
     async def execute_streaming(
         self,
-        prompt: str,
+        prompt: str | None = None,
         *,
+        input_messages: list[dict] | None = None,
         session_config: SessionConfig | None = None,
         resume: str | None = None,
         **kwargs,
     ) -> AsyncIterator[Event]:
-        """Yield typed Events as the CLI produces them."""
+        """Yield typed Events as the CLI produces them.
+
+        Pass either ``prompt`` (legacy text mode, sent as ``--print <prompt>``) or
+        ``input_messages`` (stream-json input mode, NDJSON piped to stdin). Each
+        item in ``input_messages`` must be a dict matching the claude stream-json
+        input schema, e.g. ``{"type":"user","message":{"role":"user","content":[...]}}``.
+        Use ``input_messages`` when you need multimodal content blocks (text + image)
+        that don't fit in a positional CLI argument.
+        """
+        if (prompt is None) == (input_messages is None):
+            raise ValueError("Pass exactly one of prompt or input_messages")
         cfg = session_config or SessionConfig(**{k: v for k, v in kwargs.items() if v is not None})
+
+        if input_messages is not None:
+            cmd = self._build_command(
+                prompt=None,
+                cfg=cfg,
+                output_format=OutputFormat.STREAM_JSON,
+                input_format=InputFormat.STREAM_JSON,
+                resume=resume,
+            )
+            stdin_bytes = b"".join(
+                (json.dumps(m, separators=(",", ":")) + "\n").encode("utf-8")
+                for m in input_messages
+            )
+            async for event in self._stream_handler.process_stream(
+                self._pm.stream_lines(cmd, stdin=stdin_bytes)
+            ):
+                yield event
+            return
+
         cmd = self._build_command(prompt, cfg, output_format=OutputFormat.STREAM_JSON, resume=resume)
         async for event in self._stream_handler.process_stream(self._pm.stream_lines(cmd)):
             yield event
@@ -86,13 +116,16 @@ class CLI:
 
     def _build_command(
         self,
-        prompt: str,
+        prompt: str | None,
         cfg: SessionConfig,
         output_format: OutputFormat = OutputFormat.STREAM_JSON,
         resume: str | None = None,
+        input_format: InputFormat | None = None,
     ) -> list[str]:
         builder = CommandBuilder(self._config.binary_path)
         builder.with_output_format(output_format)
+        if input_format is not None and input_format != InputFormat.TEXT:
+            builder.with_input_format(input_format)
 
         # Model
         model = cfg.model or self._config.default_model
@@ -139,5 +172,6 @@ class CLI:
         for flag in self._config.extra_flags:
             builder.add_flag(flag)
 
-        builder.with_prompt(prompt)
+        if prompt is not None:
+            builder.with_prompt(prompt)
         return builder.build()

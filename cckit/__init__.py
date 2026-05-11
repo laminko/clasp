@@ -7,7 +7,15 @@ from .agents import (
     CustomAgent,
     ResearchAgent,
 )
-from .core import ACPConfig, CLIConfig, CLI, CommandBuilder, SessionConfig
+from .core import (
+    ACPConfig,
+    CLAUDE_BARE_ALIASES,
+    CLIConfig,
+    CLI,
+    CommandBuilder,
+    SessionConfig,
+    discover_claude_models,
+)
 from .mcp import FastMCP, MCPManager, MCPServer
 from .rpc import ACPClient, PermissionPolicy, RpcTransport
 from .session import ACPSession, ConversationManager, MessageHistory, Session
@@ -22,6 +30,7 @@ from .streaming import (
 )
 from .types import (
     AgentResult,
+    InputFormat,
     Message,
     OutputFormat,
     PermissionMode,
@@ -43,10 +52,12 @@ from .utils import (
 __all__ = [
     # core
     "ACPConfig",
+    "CLAUDE_BARE_ALIASES",
     "CLIConfig",
     "CLI",
     "CommandBuilder",
     "SessionConfig",
+    "discover_claude_models",
     # session
     "ACPSession",
     "ConversationManager",
@@ -76,6 +87,7 @@ __all__ = [
     "ToolUseEvent",
     # types
     "AgentResult",
+    "InputFormat",
     "Message",
     "OutputFormat",
     "PermissionMode",

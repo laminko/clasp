@@ -92,3 +92,40 @@ class TestProcessStreamLines:
         async for line in pm.stream_lines([sys.executable, "-c", code]):
             lines.append(line)
         assert "out" in lines
+
+    @pytest.mark.asyncio
+    async def test_stream_lines_stdin_piped_when_provided(self) -> None:
+        """When stdin= is supplied, the child reads it on its stdin pipe."""
+        pm = ProcessManager()
+        # Child echoes its stdin back, one line at a time.
+        code = "import sys\nfor line in sys.stdin:\n    sys.stdout.write('got:' + line)"
+        lines = []
+        async for line in pm.stream_lines(
+            [sys.executable, "-c", code], stdin=b"alpha\nbeta\n"
+        ):
+            lines.append(line)
+        assert lines == ["got:alpha", "got:beta"]
+
+    @pytest.mark.asyncio
+    async def test_stream_lines_no_stdin_when_not_provided(self) -> None:
+        """When stdin=None (default), reading from stdin in the child sees EOF immediately
+        (because the parent's stdin is inherited and is typically not a pipe in this test
+        process). Confirms we don't accidentally open a pipe when not asked to."""
+        pm = ProcessManager()
+        # Child prints 'before', tries to read stdin (gets EOF or whatever parent supplies),
+        # then prints 'after'. We assert both 'before' and 'after' appear, meaning the read
+        # didn't hang waiting for our test process to feed bytes.
+        code = (
+            "import sys\n"
+            "print('before')\n"
+            "try:\n"
+            "    sys.stdin.read()\n"
+            "except Exception:\n"
+            "    pass\n"
+            "print('after')\n"
+        )
+        lines = []
+        async for line in pm.stream_lines([sys.executable, "-c", code]):
+            lines.append(line)
+        assert "before" in lines
+        assert "after" in lines

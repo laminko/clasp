@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..types.enums import OutputFormat, PermissionMode
+from ..types.enums import InputFormat, OutputFormat, PermissionMode
 from ..utils.helpers import expand_path
 
 
@@ -13,6 +13,7 @@ class CommandBuilder:
         self._binary = expand_path(binary_path)
         self._flags: list[str] = []
         self._prompt: str | None = None
+        self._input_format: InputFormat = InputFormat.TEXT
 
     # ── prompt ──────────────────────────────────────────────────────────────
 
@@ -24,6 +25,15 @@ class CommandBuilder:
 
     def with_output_format(self, fmt: OutputFormat) -> "CommandBuilder":
         self._flags.extend(["--output-format", fmt.value])
+        return self
+
+    # ── input ───────────────────────────────────────────────────────────────
+
+    def with_input_format(self, fmt: InputFormat) -> "CommandBuilder":
+        """Set --input-format. When STREAM_JSON, the prompt is read from stdin
+        and `build()` will emit `--print` as a bare flag (no positional arg)."""
+        self._flags.extend(["--input-format", fmt.value])
+        self._input_format = fmt
         return self
 
     # ── model ───────────────────────────────────────────────────────────────
@@ -105,6 +115,13 @@ class CommandBuilder:
     def build(self) -> list[str]:
         cmd = [self._binary]
         cmd.extend(self._flags)
-        if self._prompt is not None:
+        if self._input_format == InputFormat.STREAM_JSON:
+            if self._prompt is not None:
+                raise ValueError(
+                    "Cannot set both with_prompt() and with_input_format(STREAM_JSON); "
+                    "stream-json input is read from stdin"
+                )
+            cmd.append("--print")
+        elif self._prompt is not None:
             cmd.extend(["--print", self._prompt])
         return cmd

@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from cckit import CLIConfig, CLI, CommandBuilder, OutputFormat, PermissionMode
+from cckit import CLIConfig, CLI, CommandBuilder, InputFormat, OutputFormat, PermissionMode
 from cckit.core.config import SessionConfig
 from cckit.streaming.events import ResultEvent
 from cckit.types.enums import PermissionMode as PM
@@ -228,9 +228,11 @@ class _FakeProcessManager:
         self.stderr = stderr
         self.exit_code = exit_code
         self.ran: list[list[str]] = []
+        self.stdin_received: list[bytes | None] = []
 
-    def stream_lines(self, cmd, *, cwd=None) -> AsyncIterator[str]:
+    def stream_lines(self, cmd, *, cwd=None, stdin=None) -> AsyncIterator[str]:
         self.ran.append(cmd)
+        self.stdin_received.append(stdin)
 
         async def gen():
             for line in self.lines:
@@ -310,3 +312,122 @@ class TestCLIExecute:
         cli = self._cli_with(pm)
         await cli.execute("hi", tools=["Read"])
         assert "Read" in pm.ran[0]
+
+
+class TestCommandBuilderInputFormat:
+    def test_with_input_format_stream_json_emits_flag(self) -> None:
+        cmd = (
+            CommandBuilder("/usr/bin/claude")
+            .with_input_format(InputFormat.STREAM_JSON)
+            .build()
+        )
+        assert "--input-format" in cmd
+        idx = cmd.index("--input-format")
+        assert cmd[idx + 1] == "stream-json"
+
+    def test_stream_json_input_omits_positional_prompt(self) -> None:
+        """With stream-json input, --print is a bare flag (no positional)."""
+        cmd = (
+            CommandBuilder("/usr/bin/claude")
+            .with_input_format(InputFormat.STREAM_JSON)
+            .build()
+        )
+        # --print should appear, but should NOT be followed by a prompt string
+        assert cmd[-1] == "--print"
+
+    def test_stream_json_input_with_prompt_raises(self) -> None:
+        with pytest.raises(ValueError, match="stream-json"):
+            (
+                CommandBuilder("/usr/bin/claude")
+                .with_input_format(InputFormat.STREAM_JSON)
+                .with_prompt("hi")
+                .build()
+            )
+
+
+class TestCLIInputMessages:
+    def _cli_with(self, pm: _FakeProcessManager) -> CLI:
+        cli = CLI(binary_path="/fake/claude")
+        cli._pm = pm  # type: ignore[assignment]
+        return cli
+
+    @pytest.mark.asyncio
+    async def test_execute_streaming_pipes_messages_to_stdin(self) -> None:
+        line = json.dumps(
+            {"type": "result", "result": "ok", "session_id": "", "duration_ms": 0}
+        )
+        pm = _FakeProcessManager(lines=[line])
+        cli = self._cli_with(pm)
+
+        msgs = [
+            {"type": "user", "message": {"role": "user",
+                                          "content": [{"type": "text", "text": "hi"}]}}
+        ]
+        events = []
+        async for ev in cli.execute_streaming(input_messages=msgs):
+            events.append(ev)
+
+        # Subprocess received NDJSON on stdin
+        assert pm.stdin_received[0] is not None
+        stdin = pm.stdin_received[0].decode("utf-8")
+        assert stdin.endswith("\n")
+        assert json.loads(stdin.rstrip("\n")) == msgs[0]
+
+        # Command used stream-json input mode, no positional prompt
+        cmd = pm.ran[0]
+        assert "--input-format" in cmd and cmd[cmd.index("--input-format") + 1] == "stream-json"
+        assert cmd[-1] == "--print"
+
+    @pytest.mark.asyncio
+    async def test_execute_streaming_requires_exactly_one_input(self) -> None:
+        cli = self._cli_with(_FakeProcessManager())
+        with pytest.raises(ValueError, match="exactly one"):
+            async for _ in cli.execute_streaming():
+                pass
+        with pytest.raises(ValueError, match="exactly one"):
+            async for _ in cli.execute_streaming(
+                "hi", input_messages=[{"type": "user"}]
+            ):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_execute_streaming_text_path_unchanged(self) -> None:
+        """Regression: legacy text mode still works and does NOT pipe stdin."""
+        line = json.dumps(
+            {"type": "result", "result": "ok", "session_id": "", "duration_ms": 0}
+        )
+        pm = _FakeProcessManager(lines=[line])
+        cli = self._cli_with(pm)
+        async for _ in cli.execute_streaming("hello"):
+            pass
+        assert pm.stdin_received[0] is None
+        cmd = pm.ran[0]
+        assert "--input-format" not in cmd
+        idx = cmd.index("--print")
+        assert cmd[idx + 1] == "hello"
+
+
+class TestBaseAgentStreamExecuteMessages:
+    @pytest.mark.asyncio
+    async def test_agent_forwards_messages_to_cli(self) -> None:
+        from cckit import CustomAgent
+
+        line = json.dumps(
+            {"type": "result", "result": "ok", "session_id": "", "duration_ms": 0}
+        )
+        pm = _FakeProcessManager(lines=[line])
+        cli = CLI(binary_path="/fake/claude")
+        cli._pm = pm  # type: ignore[assignment]
+        agent = CustomAgent(cli=cli, system_prompt="be brief", bare=True)
+
+        msgs = [{"type": "user", "message": {"role": "user",
+                  "content": [{"type": "text", "text": "hi"}]}}]
+        events = []
+        async for ev in agent.stream_execute_messages(msgs):
+            events.append(ev)
+
+        assert pm.stdin_received[0] is not None
+        # Agent's session_config (system_prompt, bare) made it onto the command
+        cmd = pm.ran[0]
+        assert "--system-prompt" in cmd
+        assert "--bare" in cmd

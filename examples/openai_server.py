@@ -30,6 +30,23 @@ LIMITATIONS (documented in the design spec):
       a parse error. This sentinel collision is rare; a JSON-aware parser would be needed
       to fully resolve.
 
+IMAGE SUPPORT:
+    - Triggers stream-json input mode (`claude --input-format stream-json`) only when
+      the FINAL message of the request is a user message containing an image_url
+      content part. If the conversation ends with a tool result or assistant turn
+      (e.g., a vision question followed by a tool round-trip), all images degrade to
+      placeholders so transcript chronology is preserved — sending an earlier image
+      as "current input" would invert the temporal order the model perceives.
+    - Supported sources: `data:image/(png|jpeg|gif|webp);base64,<data>` URLs (decoded
+      to base64 blocks), and `http(s)://...` URLs (passed through as URL source —
+      Anthropic fetches the image server-side).
+    - Per-image cap: 8 MiB of base64 (~6 MiB decoded). Other URL schemes (file://,
+      blob:, etc.) return 400.
+    - Images in any message that isn't the final message degrade to `[image: <url>]`
+      text placeholders. Single-turn vision works fully; multi-turn vision and
+      tool+vision flows lose image fidelity after the first round-trip.
+    - File / document content parts (PDFs etc.) are not supported.
+
 Tested with openai>=1.0, raw httpx, and curl.
 """
 from __future__ import annotations
@@ -49,7 +66,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from cckit import CLI, CLIConfig, CustomAgent, ResultEvent, TextChunkEvent
+from cckit import (
+    CLI,
+    CLIConfig,
+    CustomAgent,
+    ResultEvent,
+    TextChunkEvent,
+    discover_claude_models,
+)
 from cckit.utils.errors import AuthError, CLIError, ParseError
 from cckit.utils.errors import TimeoutError as CckitTimeout
 
@@ -284,6 +308,175 @@ def _render_content(content: Union[str, list, None]) -> str:
     return "\n".join(parts)
 
 
+# Anthropic's Messages API documents these as the supported image media types.
+ALLOWED_IMAGE_MEDIA_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+# Cap on base64-encoded payload length per image. Base64 inflates bytes by ~33%,
+# so 8 MiB of base64 ≈ 6 MiB of decoded image data — leaves headroom over
+# Anthropic's documented 5 MiB-per-image limit while keeping memory bounded.
+MAX_IMAGE_B64_LEN = 8 * 1024 * 1024
+
+_DATA_URL_RE = re.compile(r"^data:([^;,]+);base64,(.+)$", re.DOTALL)
+
+
+def _image_part_to_block(part: ImageContentPart) -> dict:
+    """Convert an OpenAI ImageContentPart to a claude image content block.
+
+    Validates synchronously and raises HTTPException(400) on bad input so the
+    error reaches the client cleanly *before* StreamingResponse begins.
+
+    Supports two URL forms:
+      - data:image/<mime>;base64,<base64-data> → base64 source block
+      - http(s)://...                          → url source block (claude/Anthropic fetch)
+    Other schemes (file://, blob:, etc.) are rejected.
+    """
+    url = part.image_url.url
+    if url.startswith("data:"):
+        m = _DATA_URL_RE.match(url)
+        if not m:
+            raise HTTPException(400, _err(
+                "invalid_request_error",
+                "malformed data URL (expected 'data:<media-type>;base64,<data>')",
+                param="messages[].content[].image_url.url",
+            ))
+        media_type, b64 = m.group(1).strip().lower(), m.group(2)
+        if media_type not in ALLOWED_IMAGE_MEDIA_TYPES:
+            raise HTTPException(400, _err(
+                "invalid_request_error",
+                f"unsupported image media_type {media_type!r}; allowed: "
+                f"{sorted(ALLOWED_IMAGE_MEDIA_TYPES)}",
+                param="messages[].content[].image_url.url",
+            ))
+        if len(b64) > MAX_IMAGE_B64_LEN:
+            raise HTTPException(400, _err(
+                "invalid_request_error",
+                f"image payload too large ({len(b64)} base64 chars; "
+                f"limit {MAX_IMAGE_B64_LEN})",
+                param="messages[].content[].image_url.url",
+            ))
+        return {"type": "image", "source": {"type": "base64",
+                                             "media_type": media_type, "data": b64}}
+    if url.startswith("http://") or url.startswith("https://"):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    raise HTTPException(400, _err(
+        "invalid_request_error",
+        "unsupported image URL scheme; use data:<base64> or http(s)://",
+        param="messages[].content[].image_url.url",
+    ))
+
+
+def _last_user_msg_index(req: "ChatCompletionRequest") -> int:
+    """Return the index of the last role=='user' message, or -1 if none."""
+    for i in range(len(req.messages) - 1, -1, -1):
+        if req.messages[i].role == "user":
+            return i
+    return -1
+
+
+def _last_user_msg_has_images(req: "ChatCompletionRequest") -> bool:
+    """Trigger condition for the stream-json input path.
+
+    Requires the FINAL message of the request (not just the final *user*
+    message) to be a user message with at least one image content part.
+
+    Rationale: if the conversation ends with a tool result or an assistant
+    turn — e.g. a vision question followed by a tool round-trip — sending the
+    earlier image as if it were the latest input would invert the temporal
+    order the model sees ("here's prior assistant+tool history, and now an
+    image"). Falling through to the text path keeps the transcript in correct
+    chronological order; the prior-turn image degrades to the placeholder
+    ``[image: <url>]`` per the documented multi-turn limitation.
+    """
+    if not req.messages:
+        return False
+    last = req.messages[-1]
+    if last.role != "user":
+        return False
+    content = last.content
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(p, ImageContentPart) for p in content)
+
+
+def build_prompt_with_blocks(
+    req: "ChatCompletionRequest",
+) -> tuple[str, list[dict]]:
+    """Image-aware variant of build_prompt.
+
+    Returns (system_prompt, content_blocks) for the live user message. Prior
+    turns are flattened into a leading text block (with images in prior turns
+    degraded to ``[image: <url>]`` placeholders, per the documented limitation).
+    The last user message's text and image parts are appended as their own
+    blocks **in original interleave order**.
+
+    Validation of image data URLs / schemes / size happens here (raises
+    HTTPException(400)) so errors propagate before StreamingResponse begins.
+    """
+    last_idx = _last_user_msg_index(req)
+    if last_idx < 0:
+        # No user message at all — shouldn't happen given validate_request,
+        # but fall back gracefully.
+        sys_prompt, user_prompt = build_prompt(req)
+        return sys_prompt, [{"type": "text", "text": user_prompt}]
+
+    system_parts: list[str] = []
+    transcript_parts: list[str] = []
+    last_user_blocks: list[dict] = []
+
+    for i, msg in enumerate(req.messages):
+        if i == last_idx:
+            # The live user message: emit its content parts as blocks in order.
+            content = msg.content
+            if isinstance(content, str):
+                if content:
+                    last_user_blocks.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                for p in content:
+                    if isinstance(p, TextContentPart):
+                        if p.text:
+                            last_user_blocks.append({"type": "text", "text": p.text})
+                    elif isinstance(p, ImageContentPart):
+                        last_user_blocks.append(_image_part_to_block(p))
+            continue
+
+        rendered = _render_content(msg.content)
+        if msg.role in ("system", "developer"):
+            if rendered:
+                system_parts.append(rendered)
+        elif msg.role == "user":
+            transcript_parts.append(f"[User]: {rendered}")
+        elif msg.role == "assistant":
+            line = f"[Assistant]: {rendered}"
+            if msg.tool_calls:
+                tc_str = _json.dumps([
+                    {"id": tc.id, "name": tc.function.name,
+                     "arguments": _json.loads(tc.function.arguments) if tc.function.arguments else {}}
+                    for tc in msg.tool_calls
+                ])
+                line = f"[Assistant]: <<<TOOL_CALLS>>>{tc_str}<<</TOOL_CALLS>>><<<CONTENT>>>{rendered}<<</CONTENT>>>"
+            transcript_parts.append(line)
+        elif msg.role == "tool":
+            transcript_parts.append(f"[Tool {msg.tool_call_id} result]: {rendered}")
+
+    sys_prompt = "\n\n".join(system_parts)
+    if req.tools:
+        sys_prompt = (sys_prompt + "\n\n" if sys_prompt else "") + _envelope_instructions(req)
+    rf_instr = _response_format_instructions(req.response_format)
+    if rf_instr:
+        sys_prompt = (sys_prompt + "\n\n" if sys_prompt else "") + rf_instr
+
+    content_blocks: list[dict] = []
+    if transcript_parts:
+        content_blocks.append({"type": "text", "text": "\n".join(transcript_parts)})
+    content_blocks.extend(last_user_blocks)
+    # Edge case: no text/image blocks at all (empty last user message and no prior history).
+    # Send a single empty text block to keep the schema valid.
+    if not content_blocks:
+        content_blocks.append({"type": "text", "text": ""})
+    return sys_prompt, content_blocks
+
+
 def _envelope_instructions(req: "ChatCompletionRequest") -> str:
     tools_block = []
     for t in req.tools or []:
@@ -429,20 +622,41 @@ def _looks_like_claude_auth_error(text: str) -> bool:
     return any(p in lower for p in _CLAUDE_AUTH_ERROR_PATTERNS)
 
 
-async def drive_claude(req: "ChatCompletionRequest", final_usage) -> AsyncIterator[str]:
+async def drive_claude(
+    req: "ChatCompletionRequest",
+    final_usage,
+    *,
+    content_blocks: list[dict] | None = None,
+) -> AsyncIterator[str]:
     """Yield raw text chunks from claude; resolve final_usage on ResultEvent.
+
+    Two input modes:
+      - Text path (default): flattens the request to a plain text prompt via
+        ``build_prompt`` and calls ``agent.stream_execute(prompt)``.
+      - Image path: when ``content_blocks`` is supplied (precomputed and
+        validated by ``_handle_chat`` via ``build_prompt_with_blocks``), wraps
+        them into a stream-json user message and calls
+        ``agent.stream_execute_messages([...])`` instead. This drives claude
+        via ``--input-format stream-json`` on stdin so image content survives.
 
     Detects claude-side errors (auth, unexpected non-zero result) BEFORE streaming
     the message back as if it were model output. Raises cckit.AuthError or
     cckit.CLIError, which the global exception handler maps to 503 / 502.
     """
-    _, user_prompt = build_prompt(req)
     agent = _agent_factory(req)
+
+    if content_blocks is not None:
+        event_iter = agent.stream_execute_messages([
+            {"type": "user", "message": {"role": "user", "content": content_blocks}}
+        ])
+    else:
+        _, user_prompt = build_prompt(req)
+        event_iter = agent.stream_execute(user_prompt)
 
     detect_buf = ""
     detection_done = False
     try:
-        async for event in agent.stream_execute(user_prompt):
+        async for event in event_iter:
             if isinstance(event, TextChunkEvent):
                 if not event.text:
                     continue
@@ -706,8 +920,15 @@ async def _handle_chat(req: ChatCompletionRequest):
     err = validate_request(req)
     if err:
         raise err
+    # Eagerly compute image content blocks (if any). build_prompt_with_blocks
+    # raises HTTPException(400) on malformed/oversized/disallowed images, which
+    # must surface here — once StreamingResponse is returned, FastAPI exception
+    # handlers no longer run for in-generator raises.
+    content_blocks: list[dict] | None = None
+    if _last_user_msg_has_images(req):
+        _, content_blocks = build_prompt_with_blocks(req)
     final_usage = asyncio.get_running_loop().create_future()
-    chunks = drive_claude(req, final_usage)
+    chunks = drive_claude(req, final_usage, content_blocks=content_blocks)
     parser = parse_envelope_stream(chunks, tools_present=bool(req.tools))
     rid = make_request_id()
     created = int(time.time())
@@ -733,6 +954,50 @@ async def chat_completions_root(req: ChatCompletionRequest, _=Depends(verify_bea
 @app.post("/v1/chat/completions")
 async def chat_completions_v1(req: ChatCompletionRequest, _=Depends(verify_bearer)):
     return await _handle_chat(req)
+
+
+# ── /v1/models ──────────────────────────────────────────────────────────────
+#
+# The claude binary has no list-models subcommand, but it ships with a
+# compiled-in model resolution table whose entries we can extract by scanning
+# the executable. That's done in ``cckit.discover_claude_models`` (cached);
+# OCES just wraps the result in OpenAI's response shape.
+#
+# Discovery degrades gracefully: if the binary cannot be read, cckit falls
+# back to the bare aliases (``sonnet``/``opus``/``haiku``) — always valid,
+# always accepted by the CLI — so this endpoint never 500s.
+
+# Static creation timestamp — OpenAI's /v1/models spec requires ``created``
+# (unix seconds) but it has no operational meaning here. Using a fixed value
+# keeps responses byte-deterministic for caching / golden-file tests.
+_MODELS_CREATED = 1700000000
+
+
+def _model_entry(model_id: str) -> dict:
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": _MODELS_CREATED,
+        "owned_by": "anthropic",
+    }
+
+
+async def _handle_models() -> JSONResponse:
+    models = discover_claude_models(_OCESConfig.binary_path)
+    return JSONResponse({
+        "object": "list",
+        "data": [_model_entry(m) for m in models],
+    })
+
+
+@app.get("/models")
+async def models_root(_=Depends(verify_bearer)):
+    return await _handle_models()
+
+
+@app.get("/v1/models")
+async def models_v1(_=Depends(verify_bearer)):
+    return await _handle_models()
 
 
 TOOL_OPEN = "<<<TOOL_CALLS>>>"

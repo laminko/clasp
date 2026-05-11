@@ -582,16 +582,29 @@ async def test_parse_envelope_oversized_tool_buf_caps_with_error():
 
 
 class _FakeAgent:
-    """Fake CustomAgent for tests: yields the given chunks then a fake ResultEvent."""
+    """Fake CustomAgent for tests: yields the given chunks then a fake ResultEvent.
+
+    Records which entry point was used (stream_execute vs stream_execute_messages)
+    and the args, so tests can assert routing.
+    """
 
     def __init__(self, chunks, usage_raw=None):
         self._chunks = chunks
         self._usage = usage_raw or {"input_tokens": 10, "output_tokens": 20,
                                     "cache_read_input_tokens": 0,
                                     "cache_creation_input_tokens": 0}
+        self.calls: list[tuple[str, object]] = []
 
     async def stream_execute(self, prompt):
         from cckit import TextChunkEvent, ResultEvent
+        self.calls.append(("stream_execute", prompt))
+        for c in self._chunks:
+            yield TextChunkEvent(text=c)
+        yield ResultEvent(raw={"usage": self._usage}, result="", session_id="fake")
+
+    async def stream_execute_messages(self, messages):
+        from cckit import TextChunkEvent, ResultEvent
+        self.calls.append(("stream_execute_messages", messages))
         for c in self._chunks:
             yield TextChunkEvent(text=c)
         yield ResultEvent(raw={"usage": self._usage}, result="", session_id="fake")
@@ -1313,5 +1326,386 @@ def test_harness_golden_sse_snapshot():
             "SSE output drift detected. To accept new output as canonical, regenerate "
             "tests/fixtures/oces_stream_golden.txt with the snippet in plan Task 16 step 3."
         )
+    finally:
+        set_agent_factory(None)
+
+
+# ── image-input path ────────────────────────────────────────────────────────
+
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/"
+    "w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg=="
+)
+
+
+def test_image_part_to_block_data_url_ok():
+    from examples.openai_server import _image_part_to_block, ImageContentPart, ImageURL
+    part = ImageContentPart(type="image_url",
+                            image_url=ImageURL(url=f"data:image/png;base64,{_TINY_PNG_B64}"))
+    block = _image_part_to_block(part)
+    assert block["type"] == "image"
+    assert block["source"]["type"] == "base64"
+    assert block["source"]["media_type"] == "image/png"
+    assert block["source"]["data"] == _TINY_PNG_B64
+
+
+def test_image_part_to_block_data_url_bad_media_type():
+    from examples.openai_server import _image_part_to_block, ImageContentPart, ImageURL
+    part = ImageContentPart(type="image_url",
+                            image_url=ImageURL(url=f"data:image/bmp;base64,{_TINY_PNG_B64}"))
+    with pytest.raises(HTTPException) as exc:
+        _image_part_to_block(part)
+    assert exc.value.status_code == 400
+    assert "media_type" in exc.value.detail["error"]["message"]
+
+
+def test_image_part_to_block_data_url_malformed():
+    from examples.openai_server import _image_part_to_block, ImageContentPart, ImageURL
+    # Missing base64 portion
+    part = ImageContentPart(type="image_url",
+                            image_url=ImageURL(url="data:image/png,not-base64"))
+    with pytest.raises(HTTPException) as exc:
+        _image_part_to_block(part)
+    assert exc.value.status_code == 400
+    assert "malformed data URL" in exc.value.detail["error"]["message"]
+
+
+def test_image_part_to_block_oversized():
+    from examples.openai_server import _image_part_to_block, ImageContentPart, ImageURL, MAX_IMAGE_B64_LEN
+    huge = "A" * (MAX_IMAGE_B64_LEN + 1)
+    part = ImageContentPart(type="image_url",
+                            image_url=ImageURL(url=f"data:image/png;base64,{huge}"))
+    with pytest.raises(HTTPException) as exc:
+        _image_part_to_block(part)
+    assert exc.value.status_code == 400
+    assert "too large" in exc.value.detail["error"]["message"]
+
+
+def test_image_part_to_block_https_passthrough():
+    from examples.openai_server import _image_part_to_block, ImageContentPart, ImageURL
+    part = ImageContentPart(type="image_url",
+                            image_url=ImageURL(url="https://example.com/cat.png"))
+    block = _image_part_to_block(part)
+    assert block == {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}}
+
+
+def test_image_part_to_block_file_url_rejected():
+    from examples.openai_server import _image_part_to_block, ImageContentPart, ImageURL
+    part = ImageContentPart(type="image_url",
+                            image_url=ImageURL(url="file:///etc/passwd"))
+    with pytest.raises(HTTPException) as exc:
+        _image_part_to_block(part)
+    assert exc.value.status_code == 400
+    assert "scheme" in exc.value.detail["error"]["message"]
+
+
+def test_last_user_msg_has_images_no_images():
+    from examples.openai_server import _last_user_msg_has_images
+    req = _req(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "thanks"},
+    ])
+    assert _last_user_msg_has_images(req) is False
+
+
+def test_last_user_msg_has_images_when_present_in_last_turn():
+    from examples.openai_server import _last_user_msg_has_images
+    req = _req(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "what's this?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+        ]},
+    ])
+    assert _last_user_msg_has_images(req) is True
+
+
+def test_last_user_msg_has_images_only_in_prior_turn_returns_false():
+    """Per design: prior-turn images degrade to placeholders → text path."""
+    from examples.openai_server import _last_user_msg_has_images
+    req = _req(messages=[
+        {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+        ]},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "follow-up"},
+    ])
+    assert _last_user_msg_has_images(req) is False
+
+
+def test_last_user_msg_has_images_returns_false_when_final_is_tool_result():
+    """Regression: vision + tool-call flow. The final message is a tool result, so
+    the image (in an earlier user turn) must NOT trigger the stream-json path —
+    sending it as 'current input' would invert conversation chronology."""
+    from examples.openai_server import _last_user_msg_has_images, build_prompt_with_blocks
+    req = _req(messages=[
+        {"role": "user", "content": [
+            {"type": "text", "text": "describe and call the noop tool"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+        ]},
+        {"role": "assistant", "content": "calling tool", "tool_calls": [{
+            "id": "call_1", "type": "function",
+            "function": {"name": "noop", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+    ])
+    # Trigger says: text path (final message is "tool", not "user")
+    assert _last_user_msg_has_images(req) is False
+
+
+def test_last_user_msg_has_images_returns_false_when_final_is_assistant():
+    """Same family: trigger requires the final message to be a user message."""
+    from examples.openai_server import _last_user_msg_has_images
+    req = _req(messages=[
+        {"role": "user", "content": [
+            {"type": "text", "text": "x"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+        ]},
+        {"role": "assistant", "content": "ok"},
+    ])
+    assert _last_user_msg_has_images(req) is False
+
+
+# ── /v1/models endpoint ─────────────────────────────────────────────────────
+#
+# Discovery lives in cckit (cckit.core.models). These tests verify OCES wraps
+# its result in the OpenAI list shape — the discovery logic itself is covered
+# by tests/test_models.py.
+
+
+@pytest.fixture
+def _models_cache_clear():
+    """Each /v1/models test starts with an empty discovery cache."""
+    from cckit import discover_claude_models
+    discover_claude_models.cache_clear()
+    yield
+    discover_claude_models.cache_clear()
+
+
+def _stub_models(monkeypatch, ids: tuple[str, ...]) -> None:
+    """Replace cckit discovery with a fixed list for the test."""
+    import examples.openai_server as mod
+    monkeypatch.setattr(mod, "discover_claude_models", lambda _path: ids)
+
+
+def test_models_endpoint_requires_auth(_models_cache_clear):
+    client = _client()
+    r = client.get("/v1/models")
+    assert r.status_code == 401
+
+
+def test_models_endpoint_rejects_wrong_key(_models_cache_clear):
+    client = _client()
+    r = client.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+
+
+def test_models_endpoint_returns_discovered_list(_models_cache_clear, monkeypatch):
+    """Endpoint forwards whatever cckit discovers, wrapped in OpenAI shape."""
+    _stub_models(monkeypatch,
+                 ("claude-opus-4-7", "claude-sonnet-4-6", "haiku", "opus", "sonnet"))
+    client = _client()
+    r = client.get("/v1/models", headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "list"
+    ids = [m["id"] for m in body["data"]]
+    assert ids == ["claude-opus-4-7", "claude-sonnet-4-6", "haiku", "opus", "sonnet"]
+    for m in body["data"]:
+        assert m["object"] == "model"
+        assert m["owned_by"] == "anthropic"
+        assert isinstance(m["created"], int)
+
+
+def test_models_endpoint_root_path_works_too(_models_cache_clear, monkeypatch):
+    """Parity with /chat/completions also being mounted at root."""
+    _stub_models(monkeypatch, ("sonnet", "opus", "haiku"))
+    client = _client()
+    r_root = client.get("/models", headers=_auth())
+    r_v1 = client.get("/v1/models", headers=_auth())
+    assert r_root.status_code == 200
+    assert r_v1.status_code == 200
+    assert r_root.json() == r_v1.json()
+
+
+def test_models_endpoint_response_is_deterministic(_models_cache_clear, monkeypatch):
+    """Static created timestamp keeps responses cacheable; spot-check it doesn't drift."""
+    _stub_models(monkeypatch, ("sonnet", "opus", "haiku"))
+    client = _client()
+    r1 = client.get("/v1/models", headers=_auth()).json()
+    r2 = client.get("/v1/models", headers=_auth()).json()
+    assert r1 == r2
+
+
+def test_build_prompt_with_blocks_preserves_interleave_order():
+    """Advisor-flagged bug to avoid: [text, image, text, image] must stay in order."""
+    from examples.openai_server import build_prompt_with_blocks
+    req = _req(messages=[{"role": "user", "content": [
+        {"type": "text", "text": "first"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+        {"type": "text", "text": "second"},
+        {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+    ]}])
+    _, blocks = build_prompt_with_blocks(req)
+    assert [b["type"] for b in blocks] == ["text", "image", "text", "image"]
+    assert blocks[0]["text"] == "first"
+    assert blocks[2]["text"] == "second"
+    assert blocks[1]["source"]["type"] == "base64"
+    assert blocks[3]["source"]["type"] == "url"
+
+
+def test_build_prompt_with_blocks_prior_transcript_as_leading_text():
+    from examples.openai_server import build_prompt_with_blocks
+    req = _req(messages=[
+        {"role": "system", "content": "you are helpful"},
+        {"role": "user", "content": "remember the color blue"},
+        {"role": "assistant", "content": "noted"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "what color did I mention?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+        ]},
+    ])
+    sys_prompt, blocks = build_prompt_with_blocks(req)
+    # System turns go to sys_prompt, not blocks
+    assert "you are helpful" in sys_prompt
+    # Prior transcript becomes a leading text block
+    assert blocks[0]["type"] == "text"
+    assert "[User]: remember the color blue" in blocks[0]["text"]
+    assert "[Assistant]: noted" in blocks[0]["text"]
+    # Then the live user's text and image
+    assert blocks[1]["type"] == "text"
+    assert blocks[1]["text"] == "what color did I mention?"
+    assert blocks[2]["type"] == "image"
+
+
+def test_build_prompt_with_blocks_no_prior_transcript_when_only_last_user():
+    """Single-turn vision: no leading transcript block, just the live blocks."""
+    from examples.openai_server import build_prompt_with_blocks
+    req = _req(messages=[{"role": "user", "content": [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+    ]}])
+    _, blocks = build_prompt_with_blocks(req)
+    assert len(blocks) == 2
+    assert blocks[0] == {"type": "text", "text": "describe"}
+    assert blocks[1]["type"] == "image"
+
+
+def test_build_prompt_with_blocks_validates_eagerly():
+    """Image parsing errors must raise synchronously (before StreamingResponse)."""
+    from examples.openai_server import build_prompt_with_blocks
+    req = _req(messages=[{"role": "user", "content": [
+        {"type": "text", "text": "x"},
+        {"type": "image_url", "image_url": {"url": "file:///etc/passwd"}},
+    ]}])
+    with pytest.raises(HTTPException) as exc:
+        build_prompt_with_blocks(req)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_drive_claude_routes_to_messages_path_when_blocks_supplied():
+    """When _handle_chat passes content_blocks, drive_claude calls stream_execute_messages."""
+    import asyncio
+    from examples.openai_server import drive_claude, set_agent_factory
+    fake = _FakeAgent(["got image"])
+    set_agent_factory(lambda req: fake)
+    blocks = [{"type": "text", "text": "what?"},
+              {"type": "image", "source": {"type": "base64",
+                                            "media_type": "image/png", "data": "AAAA"}}]
+    final_usage = asyncio.get_event_loop().create_future()
+    out = []
+    try:
+        async for chunk in drive_claude(_req(), final_usage, content_blocks=blocks):
+            out.append(chunk)
+    finally:
+        set_agent_factory(None)
+    assert out == ["got image"]
+    # Routed to the messages method, not stream_execute
+    assert fake.calls[0][0] == "stream_execute_messages"
+    msgs = fake.calls[0][1]
+    assert msgs[0]["type"] == "user"
+    assert msgs[0]["message"]["content"] == blocks
+
+
+@pytest.mark.asyncio
+async def test_drive_claude_text_path_unchanged_when_no_blocks():
+    """Regression: existing text path still calls stream_execute, not the new method."""
+    import asyncio
+    from examples.openai_server import drive_claude, set_agent_factory
+    fake = _FakeAgent(["hello"])
+    set_agent_factory(lambda req: fake)
+    final_usage = asyncio.get_event_loop().create_future()
+    out = []
+    try:
+        async for chunk in drive_claude(_req(), final_usage):
+            out.append(chunk)
+    finally:
+        set_agent_factory(None)
+    assert out == ["hello"]
+    assert fake.calls[0][0] == "stream_execute"
+
+
+def test_endpoint_rejects_bad_image_with_400_before_streaming():
+    """E2E: malformed image returns 400 (not 200 OK with in-band error chunk)."""
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig, set_agent_factory
+    _OCESConfig.api_key = "testkey"
+    # Set a benign factory so we'd succeed if validation didn't catch us
+    set_agent_factory(_make_factory(["ok"]))
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "stream": True,
+                              "messages": [{"role": "user", "content": [
+                                  {"type": "text", "text": "look"},
+                                  {"type": "image_url",
+                                   "image_url": {"url": "file:///etc/passwd"}},
+                              ]}]})
+        assert r.status_code == 400
+        assert "scheme" in r.json()["error"]["message"]
+    finally:
+        set_agent_factory(None)
+
+
+def test_endpoint_image_request_routes_to_messages_path():
+    """E2E: a valid image request goes through stream_execute_messages."""
+    from fastapi.testclient import TestClient
+    from examples.openai_server import app, _OCESConfig, set_agent_factory
+
+    captured: dict = {}
+
+    class _CaptureAgent:
+        async def stream_execute_messages(self, messages):
+            from cckit import ResultEvent, TextChunkEvent
+            captured["messages"] = messages
+            yield TextChunkEvent(text="seen")
+            yield ResultEvent(raw={"usage": {"input_tokens": 1, "output_tokens": 1}},
+                              result="", session_id="x")
+
+    _OCESConfig.api_key = "testkey"
+    set_agent_factory(lambda req: _CaptureAgent())
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post("/v1/chat/completions", headers=_auth(),
+                        json={"model": "sonnet",
+                              "messages": [{"role": "user", "content": [
+                                  {"type": "text", "text": "describe"},
+                                  {"type": "image_url",
+                                   "image_url": {"url": f"data:image/png;base64,{_TINY_PNG_B64}"}},
+                              ]}]})
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"] == "seen"
+        # Verify the agent saw a structured stream-json input message
+        msg = captured["messages"][0]
+        assert msg["type"] == "user"
+        content = msg["message"]["content"]
+        assert content[0]["type"] == "text" and content[0]["text"] == "describe"
+        assert content[1]["type"] == "image"
+        assert content[1]["source"]["media_type"] == "image/png"
     finally:
         set_agent_factory(None)

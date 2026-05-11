@@ -54,6 +54,22 @@ class BaseAgent(ABC):
         async for event in self._cli.execute_streaming(task, session_config=self._make_config()):
             yield event
 
+    async def stream_execute_messages(
+        self, messages: list[dict]
+    ) -> AsyncIterator[Event]:
+        """Yield events while executing pre-formed input messages.
+
+        Use this when the prompt needs multimodal content blocks (text + image)
+        rather than a plain text task. Each item in ``messages`` must follow the
+        claude stream-json input schema, e.g. ``{"type":"user","message":{"role":
+        "user","content":[{"type":"text","text":"..."}, {"type":"image","source":
+        {"type":"base64","media_type":"image/png","data":"..."}}]}}``.
+        """
+        async for event in self._cli.execute_streaming(
+            input_messages=messages, session_config=self._make_config()
+        ):
+            yield event
+
     async def chat(self, session: Session | None = None) -> Session:
         """Return a Session pre-configured for this agent (for multi-turn use)."""
         if session is None:

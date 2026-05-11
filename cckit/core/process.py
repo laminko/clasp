@@ -44,13 +44,23 @@ class ProcessManager:
             raise CLIError(f"Binary not found: {cmd[0]}") from exc
 
     async def stream_lines(
-        self, cmd: list[str], *, cwd: str | None = None
+        self,
+        cmd: list[str],
+        *,
+        cwd: str | None = None,
+        stdin: bytes | None = None,
     ) -> AsyncIterator[str]:
-        """Yield stdout lines from a command as they arrive."""
+        """Yield stdout lines from a command as they arrive.
+
+        If ``stdin`` is provided, the bytes are written to the child's stdin
+        and stdin is closed before stdout reading begins. Use this with
+        ``--input-format stream-json`` to feed NDJSON input messages.
+        """
         logger.debug("Streaming: %s", " ".join(cmd))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
@@ -59,6 +69,14 @@ class ProcessManager:
             raise CLIError(f"Binary not found: {cmd[0]}") from exc
 
         assert proc.stdout is not None
+
+        if stdin is not None:
+            assert proc.stdin is not None
+            try:
+                proc.stdin.write(stdin)
+                await proc.stdin.drain()
+            finally:
+                proc.stdin.close()
 
         try:
             while True:

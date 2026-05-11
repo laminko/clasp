@@ -7,6 +7,11 @@ class OutputFormat(Enum):
     STREAM_JSON = "stream-json"
 
 
+class InputFormat(Enum):
+    TEXT = "text"
+    STREAM_JSON = "stream-json"
+
+
 class PermissionMode(Enum):
     DEFAULT = "default"
     ACCEPT_EDITS = "acceptEdits"
